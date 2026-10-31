@@ -1,0 +1,34 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Frontend dependencies and generated output
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Java build output
+target/
+build/
+.gradle/
+*.class
+
+# Logs, test output, and local runtime data
+*.log
+coverage/
+uploads/
+storage/
+tmp/
+temp/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+Desktop.ini
