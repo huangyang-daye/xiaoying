@@ -1,51 +1,164 @@
-# 素材制作网站
+# 映作 · 素材制作网站
 
-一个可独立运行的素材制作网站。用户可以浏览模板、上传图片并提交制作任务，在任务后台处理期间继续使用网站，随后查看自己的历史记录和制作结果。
+一个可独立运行的素材制作网站：浏览模板、上传图片、提交后台制作任务，再查看个人历史和图片结果。制作使用可控制耗时与失败阶段的模拟生成器，无需真实 AI 服务。
 
-## 当前阶段
+## 当前实现
 
-已完成 Git 初始化、任务规划、前端框架和后端基本业务。`backend/` 提供模板、演示身份、上传、三阶段异步任务、历史与图片结果，数据通过 MyBatis 持久化到 MySQL。`frontend/` 已接入业务接口，支持身份选择、模板浏览、上传制作、多任务跟踪、历史与结果预览。
+已完成前后端业务闭环，业务接口和持久化由 Java 提供，Next.js 通过同源代理访问 Java。
 
-进入 `frontend/`，使用 Node.js 24（推荐 24.22.1）运行 `npm ci`、`npm run dev`，访问 `http://localhost:3000`。检查命令和配置详见 [前端说明](frontend/README.md)。
+- 模板：3 个分类、6 个模板，覆盖 1、2、3 张图片要求，支持分类筛选和详情。
+- 上传：JPEG/PNG 校验、服务端保存、预览、替换、移除和错误反馈；前后端校验数量、类型和大小。
+- 制作：受理后返回任务 ID，由 Java 后台顺序执行“素材检查 → 模拟生成 → 结果整理”，支持连续提交、多任务排队及指定阶段失败。
+- 状态：独立跟踪各任务，查询异常保留原状态并支持恢复；终态停止轮询，刷新后从 Java 恢复历史和活动任务。
+- 身份与结果：A/B 演示身份隔离素材、任务和结果；成功结果可预览，失败记录保留阶段与原因。
+- 工程交付：数据库迁移和初始化数据、容器配置、关键测试及 GitHub Actions 已提供。
 
-后端推荐在根目录复制 `.env.example` 为 `.env`，设置本地数据库密码后执行 `docker compose up -d --build`，访问 `http://localhost:8080/actuator/health`。此 Compose 启动 Next.js、Java 和 MySQL，网站入口为 `http://localhost:3000`；数据库宿主机端口默认 13306。接口、模拟演示、测试和配置见 [后端说明](backend/README.md)。
+## 技术版本
 
-## 技术栈
-
-| 层次 | 技术与职责 |
+| 层次 | 版本与职责 |
 | --- | --- |
-| 前端 | Next.js App Router、React、TypeScript；提供网站页面与交互 |
-| 后端 | Java、Spring Boot、MyBatis；提供模板、素材、制作任务和个人记录相关业务接口 |
-| 数据库 | MySQL；持久化任务状态、历史记录及相关业务数据 |
+| 前端 | Node.js 24.22.1、Next.js 16.4.3 App Router、React 19.3.1、TypeScript 5.9.3；页面与异步状态 |
+| 后端 | Java 17、Maven 3.9.9、Spring Boot 3.5.16、MyBatis Starter 3.0.5；接口、校验、后台制作与持久化 |
+| 数据与文件 | MySQL 8.4、Flyway；数据库保存任务及步骤，文件卷保存素材、示例和结果 |
+| 测试 | Vitest 5.0.5、Playwright 1.64.1、JUnit、H2 契约测试及 Testcontainers MySQL 测试 |
 
-Next.js 可以直接调用 Java 后端，也可以提供接口中间层。业务执行和持久化必须由 Java 后端承担，不能仅由 Next.js 完成。
+前端依赖固定在 `frontend/package.json` 和 `package-lock.json`；Java 依赖由 `backend/pom.xml` 的固定版本及 Spring Boot parent 管理。Node.js 版本见 `frontend/.nvmrc`。
 
-## 预期使用流程
+## 快速启动
 
-1. 用户浏览并选择模板。
-2. 用户上传图片，提交制作任务。
-3. 后端接受任务并在后台处理，用户可以继续使用网站。
-4. 用户查看任务进度、个人历史记录和制作结果。
+准备 Docker Desktop 或 Docker Engine，以及 Docker Compose v2。在仓库根目录执行：
 
-## 后续代码组织
-
-采用同一仓库管理前后端：
-
-```text
-frontend/   Next.js App Router 前端（已对接 Java）
-backend/    Spring Boot + MyBatis 后端、Flyway 迁移与测试
-compose.yaml 前端、Java 与 MySQL 容器启动配置
-docs/       项目范围和架构说明
+```powershell
+# 仅首次复制；已有 .env 时保留原配置。
+Copy-Item .env.example .env
+# 编辑 .env，为 MYSQL_ROOT_PASSWORD 和 MYSQL_PASSWORD 设置本地密码。
+docker compose up -d --build --wait
 ```
 
-系统边界、任务处理原则及待确认事项见 [架构说明](docs/architecture.md)。
+首次构建需要联网下载基础镜像和依赖。启动后访问：
 
-## 任务规划
+| 入口 | 默认地址 |
+| --- | --- |
+| 网站 | http://localhost:3000 |
+| Java 健康检查 | http://localhost:8080/actuator/health |
+| MySQL 宿主机连接 | localhost:13306，数据库 material_studio，用户 material_app |
 
-根据 [任务要求](任务要求.md) 整理的 [实现方案](docs/implementation-plan.md) 包含 R-01～R-14 对应目标、接口与数据模型草案、实施顺序及验收场景；[参数字典](docs/parameter-catalog.md) 列出状态枚举、业务字段、模拟控制、架构选项及运行配置的候选值和建议默认值。
+容器间使用 `backend:8080` 和 `mysql:3306`。浏览器的 `/api/*`、`/files/*` 请求经 Next.js 转发至 Java，保留会话 Cookie。端口默认只绑定宿主机回环地址。
 
-上述文档保留规划时的方案与候选参数；当前已实现范围和实际接口以各工程 README 及源码为准。
+`MYSQL_PORT`、`BACKEND_PORT`、`FRONTEND_PORT` 和 `ALLOWED_ORIGINS` 在根目录 `.env` 中配置；更改网站端口或域名时，将实际浏览器 origin 加入 `ALLOWED_ORIGINS`。`.env.example` 只含演示值，真实 `.env` 不纳入 Git。Java 的其他环境变量见 [后端配置说明](backend/README.md#配置)，单独运行前端时的 `JAVA_INTERNAL_URL` 见 [前端启动说明](frontend/README.md#启动)。
 
-## Git
+Flyway 在 Java 启动时执行 `backend/src/main/resources/db/migration/` 中的表结构与种子迁移。Java 自动生成六张本地 PNG 示例图，无需额外下载素材。文件保存在 `backend_files` 卷，数据库保存在 `mysql_data` 卷。
 
-主分支为 `main`。本地仓库与远程托管分开配置；当前远程地址可通过 `git remote -v` 查看。
+```sh
+# 查看服务及最近日志
+docker compose ps
+docker compose logs --tail 100
+# 停止服务，保留数据库和文件卷
+docker compose down
+```
+
+## 演示流程
+
+1. 打开网站，顶部选择演示用户 A。浏览分类，选择模板并上传规定数量的 JPEG/PNG，每张不超过 5 MiB。可先保存模板封面作为测试图片。
+2. 提交制作，收到任务 ID 后可继续浏览或再次提交。默认三阶段耗时分别为 1000、4000、1000 ms；单个 Java 工作线程执行，其余任务排队。
+3. 在详情页展开“演示控制”，启用自定义参数，可指定素材检查、模拟生成或结果整理失败，并为每阶段设置 0～30000 ms 的整数耗时。失败后后续步骤跳过。
+4. 前往“我的作品”查看状态、阶段和失败原因；成功后点击图片预览结果。结果是预置示例图，不进行真实图片合成。
+5. 连续提交两个任务，或在处理中刷新页面，观察独立跟踪和恢复。关闭页面不影响 Java 执行；查询网络异常不会把任务改为失败，可点击“恢复查询”。
+6. 切换用户 B，查看独立记录；切回 A 可恢复 A 的历史。同一个演示身份由所有选择它的人共享，不能用于生产账号认证。
+
+API 演示脚本及指定阶段失败、耗时控制命令见 [后端模拟演示](backend/README.md#异步流程及模拟参数)。演示脚本要求 PowerShell 7；正式验收的项目构建、测试和执行应置于容器隔离环境中。
+
+## 状态、接口与身份
+
+任务整体状态为 `QUEUED → RUNNING → SUCCEEDED | FAILED`。三个执行阶段为 `MATERIAL_CHECK → MOCK_GENERATION → RESULT_ASSEMBLY`，每阶段独立落库，失败时记录失败阶段与原因，后续步骤置为 `SKIPPED`。Java 通过数据库队列认领任务并执行，查询请求只读取状态。
+
+Java 使用服务端 HTTP Session 和 HttpOnly、SameSite=Lax 的 `material_session` Cookie 确定身份。客户端不能用 `ownerId` 指定资源归属；无会话返回 401，他人素材、任务或结果返回 404。模板及示例图片公开访问。
+
+| 接口 | 主要输入与输出 |
+| --- | --- |
+| POST /api/session/demo | 输入 demoKey：demo-a / demo-b；返回 user 并设置 Cookie |
+| GET /api/categories、GET /api/templates | 分类列表；模板支持 categoryId、page、pageSize，返回 items/total/page/pageSize |
+| GET /api/templates/{id} | 返回标题、描述、coverUrl、requiredImageCount、acceptedMimeTypes、maxFileSizeBytes |
+| POST /api/assets | multipart：templateId、file；返回 assetId、previewUrl、mimeType、sizeBytes |
+| POST /api/tasks | 输入 templateId、assetIds、可选 simulation；202 返回 taskId、status、currentStage、queryUrl |
+| GET /api/tasks/{id} | 返回任务状态、阶段、steps、failureStage、errorMessage、result 及时间 |
+| GET /api/tasks、GET /api/tasks/active | 当前身份的分页历史、未结束任务 |
+| GET /files/assets/{id}、GET /files/results/{id} | 当前身份的素材、成功结果图片 |
+
+完整字段、校验和错误响应见 [Java API 契约](backend/README.md#接口)。
+
+## 构建与测试
+
+以下为工程内部命令；运行验收时在容器或隔离的 CI 环境执行。日常启动优先使用上述 Compose，独立开发连接配置见各工程 README。
+
+```sh
+# 在前端开发或 CI 容器中，从仓库根目录进入工程
+cd frontend
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build
+# 开发服务：npm run dev；生产构建后服务：npm start
+```
+
+```sh
+# 在可访问 Docker 的 Java 测试容器或隔离 CI 环境中
+cd backend
+mvn -B -ntp verify -DrequireDocker=true
+# 已配置 MySQL 时，可启动生成的 jar
+java -jar target/material-studio-0.1.0.jar
+```
+
+浏览器联调先启动整站，在前端测试容器中安装 Chromium（`npx playwright install --with-deps chromium`），再执行 `npm run test:e2e`；按需设置 `PLAYWRIGHT_BASE_URL` 并同步允许来源。完整流程见 [前端测试说明](frontend/README.md#检查)。
+
+`.github/workflows/` 在 push / pull request 时分别执行前端 lint、类型、状态测试与构建，Java 测试与构建，以及整站 Compose 和浏览器联调。
+
+2026-11-01 对实现版本 `6b7465d` 对应源码完成的本地容器复核：
+
+| 检查 | 结果 |
+| --- | --- |
+| 前端 lint、类型检查、生产构建 | 通过 |
+| TaskTracker 状态测试 | 4 项通过 |
+| Java H2 契约与真实调度器测试 | 9 项通过，0 失败、0 跳过 |
+| Compose 整站启动及真实 MySQL HTTP 流程 | 成功、三个阶段失败、后续跳过、结果读取和身份隔离通过 |
+| Chromium 真实浏览器流程 | 2 项通过，含刷新恢复、多任务、查询异常恢复和 390 px 布局检查 |
+
+此前 Java 完整验证报告为 18 项通过，包含 Testcontainers MySQL；本轮复核未重复运行该 MySQL 测试类，使用真实 MySQL 整站及 HTTP 流程另行核实。本地通过不代表 GitHub 托管 CI 已通过，目前没有已确认的云端运行结果。此前联调范围见 [验收记录](docs/integration-validation.md)。
+
+## 限制与未完成项
+
+- 当前为单后端实例和公开 A/B 演示身份；没有生产认证、配额、真实 AI 或素材管理后台。
+- 服务重启后会话失效，重新选择相同身份可读持久化历史。遗留 `RUNNING` 任务归档为 `FAILED / RESTART_INTERRUPTED`，`QUEUED` 任务继续调度；不自动续跑或重试。
+- 未实现提交幂等；如果提交响应丢失，应先查历史再决定重提。数据库故障可能留下 `RUNNING`，恢复数据库后需重启归档。
+- 未提供素材/结果删除及孤立文件自动清理。前端开发依赖的兼容性和审计边界见 [前端说明](frontend/README.md#windows-文件占用)。
+
+## 部署与回滚
+
+升级前备份 MySQL 数据及 `backend_files` 文件卷，并记录已验证的源码 commit 或镜像版本。更新源码和配置后，在根目录执行 `docker compose up -d --build --wait`，随后检查网站、Java 健康接口以及已有历史和结果。
+
+回滚时切换到先前验证过的源码或镜像版本并重新启动服务，确认数据库迁移向后兼容；不兼容时从配套备份恢复数据库与文件。停止服务使用 `docker compose down`，不要通过删除数据卷回滚。
+
+## AI 工作流、来源与投入
+
+本项目使用 AI 编程辅助：按 R-01～R-14 拆解接口、状态机和页面，提供任务要求与 Java 契约，生成并逐步修改工程，再通过静态检查、状态测试、后端契约测试和真实容器联调修正问题。例如拒绝小数模拟耗时、将步骤完成与下一阶段开始合并为同一事务，并验证查询异常不会改变任务业务状态。
+
+主要复用 Next.js 工程脚手架及 Spring Boot、MyBatis、Flyway 等开源依赖；页面和业务代码在本仓库实现。模板封面和模拟结果由本项目 Java2D 代码生成；根目录 PNG 为随题参考截图，未作为生产模板素材使用。
+
+可核对的项目工作日期范围为 2026-10-31～2026-11-01，包含初始化与规划、Java 业务与测试、前端对接和容器验收。该范围是日历跨度，不等于有效工时；开发者人工投入和 AI 执行时长未独立计时，暂无法提供准确小时数。
+
+## 项目结构与验收版本
+
+```text
+frontend/       Next.js 页面、状态管理、Vitest 与 Playwright 测试
+backend/        Java API、MyBatis、Flyway 迁移、后台任务与测试
+.github/        前端、后端及整站联调 CI
+compose.yaml    Next.js、Java、MySQL 及持久化数据卷
+.env.example    非敏感的本地配置示例
+docs/           规划与联调说明
+任务要求.md     R-01～R-14 原始要求
+```
+
+实现验收提交为 `6b7465ddef45dd430257939032a7f3e0f6982170`，主分支 `main`。该提交已在本地保存，尚未确认推送到远程；远程地址通过 `git remote -v` 查看。本文档更新基于该实现版本，未改变业务代码。
+
+[实现方案](docs/implementation-plan.md)、[参数字典](docs/parameter-catalog.md) 和 [初始架构规划](docs/architecture.md) 保留规划阶段的候选设计；实际接口、配置和边界以当前源码、[前端说明](frontend/README.md) 及 [后端说明](backend/README.md) 为准。

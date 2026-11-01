@@ -2,8 +2,8 @@
 /* eslint-disable @next/next/no-img-element -- Personal result images must use the browser's session cookie. */
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { statusText, stageText, type Task, type Page } from "@/lib/api";
-import { useTasks, RequireSession } from "./provider";
+import { statusText, stageText, terminal, type Task, type Page } from "@/lib/api";
+import { useTasks, RequireSession, useSession } from "./provider";
 import { useRemote } from "./use-remote";
 import { Feedback } from "./catalog";
 import { PageHeading } from "@/components/ui/page-heading";
@@ -28,6 +28,7 @@ export function TaskCard({ task, detailed = false }: { task: Task; detailed?: bo
     <p className="muted"><time dateTime={task.createdAt}>{new Date(task.createdAt).toLocaleString("zh-CN")}</time><br /><small>任务 {task.id}</small></p>
     <p aria-live="polite">{stageText[task.currentStage]}</p>
     {task.status === "FAILED" && <p className="feedback">{task.failureStage && `${stageText[task.failureStage]}：`}{task.errorMessage}</p>}
+    {!terminal(task) && !errors[task.id] && <p className="muted">正在自动跟踪，完成后停止查询。</p>}
     {errors[task.id] && <p className="feedback" role="alert">查询暂不可用，保留上次状态：{errors[task.id]} <button className="text-button" onClick={() => void tracker.query(task.id)}>恢复查询</button></p>}
     {detailed && <ol className="step-list">{task.steps.map(step => <li key={step.stage}><span>{stageText[step.stage]}</span><span>{({ PENDING: "待执行", RUNNING: "执行中", SUCCEEDED: "已完成", FAILED: "失败", SKIPPED: "已跳过" } as Record<string, string>)[step.status]}</span></li>)}</ol>}
     <ResultImage task={task} />
@@ -35,16 +36,20 @@ export function TaskCard({ task, detailed = false }: { task: Task; detailed?: bo
   </article>;
 }
 function HistoryContent() {
+  const { session } = useSession();
   const [page, setPage] = useState(1);
-  const remote = useRemote<Page<Task>>(`/api/tasks?page=${page}&pageSize=12`);
+  const remote = useRemote<Page<Task>>(`/api/tasks?page=${page}&pageSize=12`, session.user?.id ?? "");
   const { tasks, tracker } = useTasks();
   useEffect(() => { remote.data?.items.forEach(tracker.merge); }, [remote.data, tracker]);
   const listed = remote.data?.items ?? [];
-  const extra = page === 1 ? Object.values(tasks).filter(task => !listed.some(item => item.id === task.id) && (!listed[0] || task.createdAt >= listed[0].createdAt)) : [];
+  const extra = page === 1 ? Object.values(tasks).filter(task => !listed.some(item => item.id === task.id) && (listed.length === 0 || task.createdAt >= listed[0].createdAt)) : [];
   const items = [...extra, ...listed.map(task => tasks[task.id] ?? task)].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return <><div className="section-heading"><p>记录每一次创作，刷新后也能继续查看。</p><button className="button" onClick={remote.retry}>刷新记录</button></div>
-    {remote.error && <Feedback error={remote.error} retry={remote.retry} />}
-    {!remote.data ? !remote.error && <p role="status">正在读取个人记录…</p> : items.length === 0 ? <EmptyState title="还没有作品" description="选择喜欢的模板，开始第一次创作吧。" action={{ href: "/templates", label: "探索模板" }} /> : <div className="task-grid">{items.map(task => <TaskCard key={task.id} task={task} />)}</div>}
+  const refresh = () => { remote.retry(); void tracker.start(); };
+  return <><div className="section-heading"><p>刷新后从服务器恢复记录，并继续跟踪未完成的任务。</p><button className="button" onClick={refresh}>刷新记录</button></div>
+    {remote.error && <Feedback error={remote.error} retry={refresh} />}
+    {!remote.data && !remote.error && items.length === 0 ? <p role="status">正在读取个人记录…</p> : null}
+    {remote.data && items.length === 0 ? <EmptyState title="还没有作品" description="选择喜欢的模板，开始第一次创作吧。" action={{ href: "/templates", label: "探索模板" }} /> : null}
+    {items.length > 0 && <div className="task-grid">{items.map(task => <TaskCard key={task.id} task={task} />)}</div>}
     {remote.data && <div className="pagination"><button disabled={page === 1} onClick={() => setPage(n => n - 1)}>上一页</button><span>第 {page} 页 · 数据库共 {remote.data.total} 条记录</span><button disabled={page * 12 >= remote.data.total} onClick={() => setPage(n => n + 1)}>下一页</button></div>}
   </>;
 }
@@ -53,7 +58,8 @@ function DetailContent({ id }: { id: string }) {
   const { tasks, errors, tracker } = useTasks();
   useEffect(() => { let current = true; queueMicrotask(() => { if (current) void tracker.query(id); }); return () => { current = false; }; }, [id, tracker]);
   if (tasks[id]) return <TaskCard task={tasks[id]} detailed />;
-  if (errors[id]) return <Feedback error={new Error(errors[id])} retry={() => void tracker.query(id)} />;
+  if (errors[id]?.includes("不存在")) return <div className="notice"><h2>任务不存在</h2><p>这条记录不属于当前身份，或任务编号无效。</p><Link href="/history">返回我的作品</Link></div>;
+  if (errors[id]) return <div className="notice" role="alert"><p>查询暂不可用，任务没有被标为失败：{errors[id]}</p><button className="button" onClick={() => void tracker.query(id)}>恢复查询</button></div>;
   return <p role="status">正在读取任务…</p>;
 }
 export function TaskDetail({ id }: { id: string }) { return <><PageHeading eyebrow="FROM IDEA TO CREATION" title="见证灵感的诞生。" description="你可以继续浏览网站，制作会在后台进行。" /><RequireSession><DetailContent id={id} /></RequireSession></>; }

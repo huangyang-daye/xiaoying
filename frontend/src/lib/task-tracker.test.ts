@@ -24,6 +24,19 @@ describe("per-session task tracking", () => {
     await vi.advanceTimersByTimeAsync(1000); expect(fetch).toHaveBeenCalledTimes(1);
     await tracker.query("a"); expect(tracker.getSnapshot().tasks.a.status).toBe("SUCCEEDED"); expect(tracker.getSnapshot().errors.a).toBeUndefined(); tracker.dispose();
   });
+  it("keeps polling other tasks when one query fails", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(async (id: string) => { if (id === "a") throw new Error("network down"); return task("b", "SUCCEEDED", 2); });
+    const tracker = new TaskTracker({ task: fetch, active: async () => page([task("a"), task("b")]) }, 100);
+    await tracker.start(); await vi.advanceTimersByTimeAsync(100);
+    expect(tracker.getSnapshot().tasks.a.status).toBe("RUNNING");
+    expect(tracker.getSnapshot().errors.a).toBe("network down");
+    expect(tracker.getSnapshot().tasks.b.status).toBe("SUCCEEDED");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetch.mock.calls.filter(call => call[0] === "a")).toHaveLength(1);
+    expect(fetch.mock.calls.filter(call => call[0] === "b")).toHaveLength(1);
+    tracker.dispose();
+  });
   it("ignores late responses after switching identity and cancels timers", async () => {
     vi.useFakeTimers(); let finish!: (task: Task) => void;
     const tracker = new TaskTracker({ task: () => new Promise(resolve => { finish = resolve; }), active: async () => page([task("a")]) }, 100);

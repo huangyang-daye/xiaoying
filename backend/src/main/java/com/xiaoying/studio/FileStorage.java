@@ -22,6 +22,7 @@ public class FileStorage {
         var keys=List.of("postcard","collage","portrait","duo","pet","pet-story");
         for(int i=0;i<keys.size();i++) createSample(keys.get(i),i);
     }
+    public void ensureSample(String key) throws IOException { createSample(key,Math.floorMod(key.hashCode(),6)); }
     private void createSample(String key,int index) throws IOException {
         Path file=path("samples/"+key+".png");
         if(Files.exists(file)) return;
@@ -31,7 +32,8 @@ public class FileStorage {
             g.setColor(Color.getHSBColor(index/6f,.28f,.9f)); g.fillRect(0,0,800,600);
             g.setColor(new Color(255,255,255,150)); g.fillOval(390,30,350,350);
             g.setColor(new Color(35,60,55)); g.fillRoundRect(60,340,680,200,28,28);
-            g.setColor(Color.WHITE); g.setFont(new Font(Font.SANS_SERIF,Font.BOLD,38)); g.drawString("STUDIO / "+key.toUpperCase(Locale.ROOT),90,420);
+            String label=key.length()>24?key.substring(0,24):key;
+            g.setColor(Color.WHITE); g.setFont(new Font(Font.SANS_SERIF,Font.BOLD,38)); g.drawString("STUDIO / "+label.toUpperCase(Locale.ROOT),90,420);
             g.setFont(new Font(Font.SANS_SERIF,Font.PLAIN,22)); g.drawString("Local simulation sample",90,475);
         } finally { g.dispose(); }
         if(!ImageIO.write(image,"png",file.toFile())) throw new IOException("PNG encoder unavailable");

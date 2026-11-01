@@ -12,7 +12,7 @@ public class AssetService {
     private final StudioMapper db; private final CatalogService catalog; private final FileStorage storage;
     public AssetService(StudioMapper db,CatalogService catalog,FileStorage storage) { this.db=db; this.catalog=catalog; this.storage=storage; }
     public AssetView upload(String owner,String templateId,MultipartFile file) {
-        String mime=storage.inspect(file,catalog.require(templateId));
+        String mime=storage.inspect(file,catalog.require(templateId,owner));
         Asset a=new Asset(); a.id=UUID.randomUUID().toString(); a.ownerId=owner; a.mimeType=mime;
         String name=file.getOriginalFilename()==null?"image":file.getOriginalFilename().replaceAll("[\\p{Cntrl}/\\\\]","_");
         a.originalName=name.substring(0,Math.min(255,name.length())); a.sizeBytes=file.getSize(); a.createdAt=Instant.now();

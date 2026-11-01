@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, type Asset, type Template } from "@/lib/api";
 import { useRemote } from "./use-remote";
-import { RequireSession, useTasks } from "./provider";
+import { RequireSession, useSession, useTasks } from "./provider";
 import { Feedback } from "./catalog";
 import { TaskCard } from "./task-view";
 import { PageHeading } from "@/components/ui/page-heading";
@@ -37,35 +37,47 @@ function UploadSlot({ index, template, disabled, onChange }: { index: number; te
     {slot.uploading && <p role="status">上传中…可以重新选择图片替换</p>}{slot.error && <p className="feedback" role="alert">{slot.error}</p>}
   </div>;
 }
+function AcceptedTask({ id }: { id: string }) {
+  const { tasks, errors, tracker } = useTasks();
+  const task = tasks[id];
+  if (task) return <TaskCard task={task} />;
+  if (errors[id]) return <div className="notice" data-task-id={id}><p>任务已受理。</p><p className="feedback" role="alert">查询暂不可用，任务没有被标为失败：{errors[id]} <button className="text-button" onClick={() => void tracker.query(id)}>恢复查询</button></p><Link href={`/tasks/${id}`}>查看任务</Link></div>;
+  return <div className="notice" data-task-id={id} role="status"><p>任务已受理，正在读取状态。</p><Link href={`/tasks/${id}`}>查看任务 {id}</Link></div>;
+}
 function CreationForm({ template }: { template: Template }) {
   const [slots, setSlots] = useState<Slot[]>(() => Array.from({ length: template.requiredImageCount }, () => ({ uploading: false })));
   const [submitting, setSubmitting] = useState(false); const submitLock = useRef(false);
   const [error, setError] = useState<string | null>(null); const [accepted, setAccepted] = useState<string[]>([]);
   const [simulation, setSimulation] = useState(false); const [failAtStage, setFailAtStage] = useState("NONE");
-  const [delays, setDelays] = useState([1000, 4000, 1000]); const { tasks, tracker } = useTasks();
-  const lifetime = useRef<AbortController | null>(null);
-  useEffect(() => { lifetime.current = new AbortController(); return () => lifetime.current?.abort(); }, []);
+  const [delays, setDelays] = useState([1000, 4000, 1000]); const { tracker } = useTasks();
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const uploading = slots.some(slot => slot.uploading);
   const ready = slots.every(slot => !!slot.asset && !slot.uploading);
+  const phase = uploading ? "素材上传中" : submitting ? "提交请求中" : accepted.length > 0 ? "任务已受理，可以继续提交" : "";
   async function submit(event: React.FormEvent) {
     event.preventDefault(); if (!ready || submitLock.current) return;
-    submitLock.current = true; setSubmitting(true); setError(null); const signal = lifetime.current!.signal;
+    submitLock.current = true; setSubmitting(true); setError(null);
     try {
-      const data = await api<{ taskId: string }>("/api/tasks", { method: "POST", signal, body: JSON.stringify({ templateId: template.id, assetIds: slots.map(slot => slot.asset!.assetId), ...(simulation ? { simulation: { failAtStage, materialCheckDelayMs: delays[0], mockGenerationDelayMs: delays[1], resultAssemblyDelayMs: delays[2] } } : {}) }) });
-      if (signal.aborted) return; setAccepted(ids => [data.taskId, ...ids]); void tracker.query(data.taskId);
-    } catch (cause) { if (!signal.aborted) { setError(`${(cause as Error).message} 如响应丢失，任务可能已受理，请先查看我的作品再决定是否重提。`); void tracker.start(); } }
-    finally { if (!signal.aborted) { submitLock.current = false; setSubmitting(false); } }
+      const data = await api<{ taskId: string }>("/api/tasks", { method: "POST", body: JSON.stringify({ templateId: template.id, assetIds: slots.map(slot => slot.asset!.assetId), ...(simulation ? { simulation: { failAtStage, materialCheckDelayMs: delays[0], mockGenerationDelayMs: delays[1], resultAssemblyDelayMs: delays[2] } } : {}) }) });
+      void tracker.query(data.taskId);
+      if (mounted.current) setAccepted(ids => [data.taskId, ...ids]);
+    } catch (cause) { if (mounted.current) { setError(`${(cause as Error).message} 如响应丢失，任务可能已受理，请先查看我的作品再决定是否重提。`); void tracker.start(); } }
+    finally { submitLock.current = false; if (mounted.current) setSubmitting(false); }
   }
   return <><form onSubmit={event => void submit(event)} className="creation-panel"><h2>上传你的图片</h2><p className="muted">需要 {template.requiredImageCount} 张 · JPEG / PNG · 每张不超过 {template.maxFileSizeBytes / 1048576} MiB</p>
     <div className="upload-grid">{slots.map((_, index) => <UploadSlot key={index} index={index} template={template} disabled={submitting} onChange={(i, slot) => setSlots(previous => previous.map((item, position) => position === i ? slot : item))} />)}</div>
     <details className="simulation"><summary>演示控制（可选）</summary><label><input type="checkbox" checked={simulation} disabled={submitting} onChange={event => setSimulation(event.target.checked)} />使用自定义模拟参数</label>{simulation && <div className="simulation-fields"><label>失败阶段<select value={failAtStage} disabled={submitting} onChange={event => setFailAtStage(event.target.value)}><option value="NONE">不失败</option><option value="MATERIAL_CHECK">素材检查</option><option value="MOCK_GENERATION">模拟生成</option><option value="RESULT_ASSEMBLY">结果整理</option></select></label>{["素材检查耗时", "模拟生成耗时", "结果整理耗时"].map((label, i) => <label key={label}>{label}（毫秒）<input type="number" min={0} max={30000} step={1} required disabled={submitting} value={Number.isNaN(delays[i]) ? "" : delays[i]} onChange={event => setDelays(values => values.map((value, j) => i === j ? event.target.valueAsNumber : value))} /></label>)}</div>}</details>
+    {phase && <p role="status">{phase}</p>}
     {error && <p className="feedback" role="alert">{error} <Link href="/history">查看我的作品</Link></p>}
-    <button className="button" type="submit" disabled={!ready || submitting}>{submitting ? "正在提交…" : "提交制作任务"}</button><p className="muted">任务受理后，你可以继续选择模板或提交其他任务。</p>
-  </form><div className="submitted-tasks" aria-live="polite">{accepted.map(id => tasks[id] ? <TaskCard key={id} task={tasks[id]} /> : <div className="notice" key={id}>任务已受理。<Link href={`/tasks/${id}`}>查看任务 {id}</Link></div>)}</div></>;
+    <button className="button" type="submit" disabled={!ready || submitting}>{submitting ? "正在提交…" : "提交制作任务"}</button><p className="muted">受理后会立刻显示任务，提交按钮恢复可再次提交。每个任务单独跟踪。</p>
+  </form><div className="submitted-tasks" aria-live="polite">{accepted.map(id => <AcceptedTask key={id} id={id} />)}</div></>;
 }
 export function TemplateDetail({ id }: { id: string }) {
-  const remote = useRemote<Template>(`/api/templates/${encodeURIComponent(id)}`);
+  const { session } = useSession();
+  const remote = useRemote<Template>(`/api/templates/${encodeURIComponent(id)}`, session.user?.id ?? "");
   if (remote.error) return <><PageHeading eyebrow="MAKE IT YOURS" title={remote.error.status === 404 ? "模板不存在" : "模板暂不可用"} description="返回模板列表，或稍后重试。" /><Feedback error={remote.error} retry={remote.retry} /><Link href="/templates">返回模板列表</Link></>;
   if (!remote.data) return <p role="status">正在加载模板详情…</p>;
   const template = remote.data;
-  return <><PageHeading eyebrow="MAKE IT YOURS" title={template.title} description={template.description} /><div className="detail-layout"><div className="template-example"><img src={template.coverUrl} alt={`${template.title} 示例`} width={800} height={600} /><p className="muted">示例效果 · 制作为模拟演示</p></div><RequireSession><CreationForm key={template.id} template={template} /></RequireSession></div></>;
+  return <><PageHeading eyebrow="MAKE IT YOURS" title={template.title} description={template.description} /><p className="muted">{template.ownerId ? "这是你的自建模板，只有你能看到。" : "这是公共模板，所有人都能看到。"}</p><div className="detail-layout"><div className="template-example"><img src={template.coverUrl} alt={`${template.title} 示例`} width={800} height={600} /><p className="muted">示例效果 · 制作为模拟演示</p></div><RequireSession><CreationForm key={template.id} template={template} /></RequireSession></div></>;
 }

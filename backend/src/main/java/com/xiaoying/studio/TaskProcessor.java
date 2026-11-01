@@ -22,9 +22,12 @@ public class TaskProcessor {
                             throw new ApiException(500,"MATERIAL_UNAVAILABLE","制作所需素材缺失或已损坏");
                     }
                     case MOCK_GENERATION -> {
-                        if(!Files.isRegularFile(storage.path("samples/"+t.sampleKey+".png"))) throw new ApiException(500,"GENERATION_FAILED","预置生成图片不可用");
+                        if(Models.text(t.sampleResultUrl)==null && !Files.isRegularFile(storage.path("samples/"+t.sampleKey+".png"))) throw new ApiException(500,"GENERATION_FAILED","预置生成图片不可用");
                     }
-                    case RESULT_ASSEMBLY -> { resultKey=storage.assemble(t); resultSize=Files.size(storage.path(resultKey)); }
+                    case RESULT_ASSEMBLY -> {
+                        if(Models.text(t.sampleResultUrl)==null) { resultKey=storage.assemble(t); resultSize=Files.size(storage.path(resultKey)); }
+                        else resultSize=0L;
+                    }
                     default -> throw new IllegalStateException("Not an executable stage");
                 }
                 lifecycle.completeStep(t.id,stage,resultKey,resultSize);

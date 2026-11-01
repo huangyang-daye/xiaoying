@@ -25,7 +25,7 @@ public class TaskService {
     }
     @Transactional
     public Task create(String owner,CreateTask request) {
-        Template template=catalog.require(request.templateId());
+        Template template=catalog.require(request.templateId(),owner);
         var ids=request.assetIds();
         if(ids.size()!=template.requiredImageCount || new HashSet<>(ids).size()!=ids.size()) throw new ApiException(400,"INVALID_ASSET_COUNT","图片数量须符合模板要求且不可重复");
         for(String id:ids) {
@@ -35,7 +35,8 @@ public class TaskService {
         Simulation s=request.simulation();
         if(s!=null && !simulationEnabled) throw new ApiException(403,"SIMULATION_DISABLED","当前环境不接受模拟控制参数");
         Task t=new Task(); t.id=UUID.randomUUID().toString(); t.ownerId=owner; t.templateId=template.id; t.templateTitle=template.title;
-        t.sampleKey=template.sampleKey; t.status=Status.QUEUED; t.currentStage=Stage.NOT_STARTED;
+        t.sampleKey=template.sampleKey; t.sampleResultUrl=Models.text(template.sampleResultUrl);
+        t.status=Status.QUEUED; t.currentStage=Stage.NOT_STARTED;
         t.failAtStage=s==null || s.failAtStage()==null?Failure.NONE:s.failAtStage();
         t.checkDelayMs=delay(s==null?null:s.materialCheckDelayMs(),checkDelay);
         t.generationDelayMs=delay(s==null?null:s.mockGenerationDelayMs(),generationDelay);
@@ -53,8 +54,20 @@ public class TaskService {
         CatalogService.validatePage(page,size);
         return new Page<>(db.history(owner,statuses,size,(long)(page-1)*size).stream().map(this::view).toList(),db.taskCount(owner,statuses),page,size);
     }
+    private static String imageType(String url) {
+        String path=url; int query=path.indexOf('?'); if(query>=0) path=path.substring(0,query);
+        int hash=path.indexOf('#'); if(hash>=0) path=path.substring(0,hash);
+        String lower=path.toLowerCase(Locale.ROOT);
+        if(lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if(lower.endsWith(".webp")) return "image/webp";
+        if(lower.endsWith(".gif")) return "image/gif";
+        return "image/png";
+    }
     private TaskView view(Task t) {
-        ResultView result=t.status==Status.SUCCEEDED?new ResultView(t.id,"/files/results/"+t.id,"image/png",t.resultSize):null;
+        String linked=Models.text(t.sampleResultUrl);
+        ResultView result=t.status!=Status.SUCCEEDED?null:linked!=null
+            ?new ResultView(t.id,linked,imageType(linked),t.resultSize==null?0:t.resultSize)
+            :new ResultView(t.id,"/files/results/"+t.id,"image/png",t.resultSize);
         return new TaskView(t.id,t.templateId,t.templateTitle,t.status,t.currentStage,t.failureStage,t.errorCode,t.errorMessage,result,
             t.version,t.createdAt,t.updatedAt,t.startedAt,t.finishedAt,db.steps(t.id));
     }

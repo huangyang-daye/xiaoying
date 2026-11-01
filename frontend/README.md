@@ -1,6 +1,6 @@
 # 映作前端
 
-Next.js App Router + React + TypeScript，已接入 Java 后端业务接口。支持模板分类与详情、A/B 演示身份、图片上传/替换/移除、异步任务提交、个人历史、三阶段进度、失败原因和图片预览。
+Node.js 24.22.1、Next.js 16.4.3 App Router、React 19.3.1、TypeScript 5.9.3，已接入 Java 后端业务接口。支持模板分类与详情、A/B 演示身份、图片上传/替换/移除、异步任务提交、个人历史、三阶段进度、失败原因和图片预览。
 
 ## 启动
 
@@ -65,7 +65,7 @@ npm run test:e2e
 
 CI 的 frontend-ci 执行 lint、类型、状态测试和构建，backend-ci 执行 Java 测试，integration-ci 构建整站容器后执行真实浏览器流程；本地通过不代表 GitHub 托管流水线已经执行。
 
-2026-11-01 已通过 4 项状态测试、2 项真实 Java/MySQL 浏览器场景、lint、类型检查和生产容器构建。具体覆盖与边界见 [联调验收记录](../docs/integration-validation.md)。Next.js 运行时最低 Node 20.9，但本项目开发测试依赖要求较新 Node，统一使用 Node 24 和 `.nvmrc` 指定版本。
+2026-11-01 已通过 4 项状态测试、2 项真实 Java/MySQL 浏览器场景、lint、类型检查和生产容器构建。随后对实现版本 `6b7465d` 的容器复核再次通过上述检查和两个 Chromium 浏览器场景，详见[根目录验证结果](../README.md#构建与测试)；此前具体覆盖与边界见 [联调验收记录](../docs/integration-validation.md)。Next.js 运行时最低 Node 20.9，但本项目开发测试依赖要求较新 Node，统一使用 Node 24 和 `.nvmrc` 指定版本。
 
 ## Windows 文件占用
 

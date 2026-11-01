@@ -13,6 +13,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.*;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.http.MediaType;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -53,6 +54,68 @@ abstract class BackendContract {
     }
     JsonNode detail(String id) throws Exception {
         return json.readTree(mvc.perform(get("/api/tasks/"+id).session(a)).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
+    }
+    @Test void imageLinksComeFromDatabaseWhenPresent() throws Exception {
+        try {
+            mvc.perform(get("/api/templates/demo-pet")).andExpect(jsonPath("$.coverUrl").value("/files/samples/pet"));
+            jdbc.update("UPDATE template SET cover_url='  ', sample_result_url='' WHERE id='demo-pet'");
+            mvc.perform(get("/api/templates/demo-pet")).andExpect(jsonPath("$.coverUrl").value("/files/samples/pet"));
+            jdbc.update("UPDATE template SET cover_url=?, sample_result_url=? WHERE id='demo-pet'",
+                "https://cdn.example/covers/pet.png","https://cdn.example/results/pet.jpg");
+            mvc.perform(get("/api/templates/demo-pet")).andExpect(jsonPath("$.coverUrl").value("https://cdn.example/covers/pet.png"));
+            String linked=create(Failure.NONE,0); processor.runNext();
+            JsonNode task=detail(linked);
+            assertEquals("https://cdn.example/results/pet.jpg",task.get("result").get("url").asText());
+            assertEquals("image/jpeg",task.get("result").get("mimeType").asText());
+            mvc.perform(get("/files/results/"+linked).session(a)).andExpect(status().isNotFound());
+            jdbc.update("UPDATE template SET cover_url=NULL, sample_result_url=NULL WHERE id='demo-pet'");
+            mvc.perform(get("/api/templates/demo-pet")).andExpect(jsonPath("$.coverUrl").value("/files/samples/pet"));
+            assertEquals(task,detail(linked));
+            String local=create(Failure.NONE,0); processor.runNext();
+            assertEquals("/files/results/"+local,detail(local).get("result").get("url").asText());
+            mvc.perform(get("/files/results/"+local).session(a)).andExpect(status().isOk()).andExpect(content().contentType("image/png"));
+        } finally { jdbc.update("UPDATE template SET cover_url=NULL, sample_result_url=NULL WHERE id='demo-pet'"); }
+    }
+    byte[] templateBody(String id,String title,String cover,String result) throws Exception {
+        var body=new LinkedHashMap<String,Object>();
+        body.put("id",id); body.put("categoryId","creative"); body.put("title",title); body.put("description","自行添加的模板");
+        body.put("requiredImageCount",1); body.put("acceptedMimeTypes",List.of("image/png")); body.put("maxFileSizeBytes",5242880);
+        body.put("coverUrl",cover); body.put("sampleResultUrl",result);
+        return json.writeValueAsBytes(body);
+    }
+    @Test void templatesCanBeCreatedAndUpdated() throws Exception {
+        mvc.perform(post("/api/templates").contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","自定义卡片",null,null))).andExpect(status().isUnauthorized());
+        try {
+            mvc.perform(post("/api/templates").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("Bad ID","自定义卡片",null,null))).andExpect(status().isBadRequest());
+            mvc.perform(post("/api/templates").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","自定义卡片",null,null)))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.ownerId").value("demo-a")).andExpect(jsonPath("$.coverUrl").value("/files/samples/custom-card")).andExpect(jsonPath("$.storedCoverUrl").value(nullValue()));
+            mvc.perform(get("/api/templates/custom-card")).andExpect(status().isNotFound());
+            mvc.perform(get("/api/templates/custom-card").session(b)).andExpect(status().isNotFound());
+            mvc.perform(put("/api/templates/custom-card").session(b).contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","别人的标题",null,null))).andExpect(status().isNotFound());
+            mvc.perform(get("/api/templates").param("categoryId","creative")).andExpect(jsonPath("$.total").value(2));
+            mvc.perform(get("/api/templates").param("scope","mine").session(a)).andExpect(jsonPath("$.total").value(1)).andExpect(jsonPath("$.items[0].id").value("custom-card"));
+            mvc.perform(get("/api/templates/demo-postcard")).andExpect(jsonPath("$.ownerId").value(nullValue()));
+            mvc.perform(get("/files/samples/custom-card")).andExpect(status().isNotFound());
+            mvc.perform(get("/files/samples/custom-card").session(b)).andExpect(status().isNotFound());
+            mvc.perform(get("/files/samples/custom-card").session(a)).andExpect(status().isOk()).andExpect(content().contentType("image/png"));
+            mvc.perform(multipart("/api/assets").file(new MockMultipartFile("file","test.png","image/png",image())).param("templateId","custom-card").session(b)).andExpect(status().isNotFound());
+            mvc.perform(put("/api/templates/custom-card").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","新标题","https://cdn.example/cover.png","https://cdn.example/result.jpg")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.title").value("新标题")).andExpect(jsonPath("$.coverUrl").value("https://cdn.example/cover.png")).andExpect(jsonPath("$.sampleResultUrl").value("https://cdn.example/result.jpg"));
+            mvc.perform(put("/api/templates/custom-card").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","自定义卡片","","")))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.coverUrl").value("/files/samples/custom-card")).andExpect(jsonPath("$.storedCoverUrl").value(nullValue()));
+            mvc.perform(post("/api/templates").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("custom-card","自定义卡片",null,null))).andExpect(status().isConflict());
+            mvc.perform(put("/api/templates/missing").session(a).contentType(MediaType.APPLICATION_JSON).content(templateBody("missing","自定义卡片",null,null))).andExpect(status().isNotFound());
+            String asset=json.readTree(mvc.perform(multipart("/api/assets").file(new MockMultipartFile("file","test.png","image/png",image())).param("templateId","custom-card").session(a))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsByteArray()).get("assetId").asText();
+            String id=json.readTree(mvc.perform(post("/api/tasks").session(a).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "templateId","custom-card","assetIds",List.of(asset),"simulation",Map.of("failAtStage","NONE","materialCheckDelayMs",0,"mockGenerationDelayMs",0,"resultAssemblyDelayMs",0)))))
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsByteArray()).get("taskId").asText();
+            processor.runNext();
+            assertEquals("/files/results/"+id,detail(id).get("result").get("url").asText());
+        } finally {
+            jdbc.update("DELETE FROM task_step"); jdbc.update("DELETE FROM task_asset"); jdbc.update("DELETE FROM production_task"); jdbc.update("DELETE FROM asset");
+            jdbc.update("DELETE FROM template WHERE id='custom-card'");
+        }
     }
     @Test void catalogAndValidation() throws Exception {
         mvc.perform(get("/api/categories")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(3));

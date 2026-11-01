@@ -1,7 +1,7 @@
 export type User = { id: string; displayName: string };
 export type Category = { id: string; name: string };
 export type Page<T> = { items: T[]; total: number; page: number; pageSize: number };
-export type Template = { id: string; categoryId: string; title: string; description: string; coverUrl: string; requiredImageCount: number; acceptedMimeTypes: string[]; maxFileSizeBytes: number };
+export type Template = { id: string; categoryId: string; title: string; description: string; coverUrl: string; requiredImageCount: number; acceptedMimeTypes: string[]; maxFileSizeBytes: number; storedCoverUrl: string | null; sampleResultUrl: string | null; ownerId: string | null };
 export type Asset = { assetId: string; previewUrl: string; mimeType: string; sizeBytes: number };
 export type Status = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
 export type Stage = "NOT_STARTED" | "MATERIAL_CHECK" | "MOCK_GENERATION" | "RESULT_ASSEMBLY" | "COMPLETED";

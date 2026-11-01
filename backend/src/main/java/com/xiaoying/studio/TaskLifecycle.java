@@ -24,8 +24,9 @@ public class TaskLifecycle {
         var steps=db.steps(id); int index=STAGES.indexOf(stage); Instant now=Instant.now();
         Step current=steps.get(index); current.status=StepStatus.SUCCEEDED; current.finishedAt=now; db.updateStep(current);
         if(index==STAGES.size()-1) {
-            if(resultKey==null || resultSize==null) throw new IllegalStateException("Result is required");
-            t.status=Status.SUCCEEDED; t.currentStage=Stage.COMPLETED; t.resultKey=resultKey; t.resultSize=resultSize; t.finishedAt=now;
+            boolean linked=Models.text(t.sampleResultUrl)!=null;
+            if(!linked && (resultKey==null || resultSize==null)) throw new IllegalStateException("Result is required");
+            t.status=Status.SUCCEEDED; t.currentStage=Stage.COMPLETED; t.resultKey=linked?null:resultKey; t.resultSize=resultSize==null?0L:resultSize; t.finishedAt=now;
         } else {
             Step next=steps.get(index+1); next.status=StepStatus.RUNNING; next.startedAt=now; db.updateStep(next); t.currentStage=next.stage;
         }

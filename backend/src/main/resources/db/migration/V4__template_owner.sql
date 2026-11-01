@@ -1,0 +1,1 @@
+ALTER TABLE template ADD COLUMN owner_id VARCHAR(32) NULL;

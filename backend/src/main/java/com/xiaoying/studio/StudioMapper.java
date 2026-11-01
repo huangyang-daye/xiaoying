@@ -9,12 +9,21 @@ public interface StudioMapper {
     @Select("SELECT * FROM template_category ORDER BY sort_order,id") List<Category> categories();
     @Select("SELECT * FROM template ORDER BY id") List<Template> templates();
     @Select("SELECT * FROM template WHERE id=#{id}") Template template(String id);
+    @Insert("""
+        INSERT INTO template(id,category_id,title,description,required_image_count,accepted_mime_types,max_file_size_bytes,sample_key,cover_url,sample_result_url,owner_id)
+        VALUES(#{id},#{categoryId},#{title},#{description},#{requiredImageCount},#{acceptedMimeTypes},#{maxFileSizeBytes},#{sampleKey},#{coverUrl},#{sampleResultUrl},#{ownerId})
+        """) void insertTemplate(Template t);
+    @Update("""
+        UPDATE template SET category_id=#{categoryId},title=#{title},description=#{description},required_image_count=#{requiredImageCount},
+        accepted_mime_types=#{acceptedMimeTypes},max_file_size_bytes=#{maxFileSizeBytes},cover_url=#{coverUrl},sample_result_url=#{sampleResultUrl}
+        WHERE id=#{id}
+        """) int updateTemplate(Template t);
     @Insert("INSERT INTO asset VALUES(#{id},#{ownerId},#{originalName},#{storageKey},#{mimeType},#{sizeBytes},#{createdAt})") void insertAsset(Asset a);
     @Select("SELECT * FROM asset WHERE id=#{id} AND owner_id=#{owner}") Asset asset(@Param("id") String id,@Param("owner") String owner);
     @Insert("""
-        INSERT INTO production_task(id,owner_id,template_id,template_title,sample_key,status,current_stage,
+        INSERT INTO production_task(id,owner_id,template_id,template_title,sample_key,sample_result_url,status,current_stage,
         fail_at_stage,check_delay_ms,generation_delay_ms,assembly_delay_ms,version,created_at,updated_at)
-        VALUES(#{id},#{ownerId},#{templateId},#{templateTitle},#{sampleKey},#{status},#{currentStage},
+        VALUES(#{id},#{ownerId},#{templateId},#{templateTitle},#{sampleKey},#{sampleResultUrl},#{status},#{currentStage},
         #{failAtStage},#{checkDelayMs},#{generationDelayMs},#{assemblyDelayMs},#{version},#{createdAt},#{updatedAt})
         """) void insertTask(Task t);
     @Insert("INSERT INTO task_asset VALUES(#{task},#{asset},#{slot})") void linkAsset(@Param("task") String task,@Param("asset") String asset,@Param("slot") int slot);

@@ -15,14 +15,14 @@ import com.xiaoying.studio.Models.*;
 @RestController
 public class ApiController {
     private final CatalogService catalog; private final AssetService assets; private final TaskService tasks;
-    private final FileStorage storage; private final StudioMapper db; private final boolean demoEnabled;
-    public ApiController(CatalogService catalog,AssetService assets,TaskService tasks,FileStorage storage,StudioMapper db,@Value("${app.demo-enabled}") boolean demoEnabled) {
-        this.catalog=catalog; this.assets=assets; this.tasks=tasks; this.storage=storage; this.db=db; this.demoEnabled=demoEnabled;
+    private final FileStorage storage; private final boolean demoEnabled;
+    public ApiController(CatalogService catalog,AssetService assets,TaskService tasks,FileStorage storage,@Value("${app.demo-enabled}") boolean demoEnabled) {
+        this.catalog=catalog; this.assets=assets; this.tasks=tasks; this.storage=storage; this.demoEnabled=demoEnabled;
     }
-    private User user(HttpServletRequest request) {
+    private User user(HttpServletRequest request) { User u=viewer(request); if(u==null) throw new ApiException(401,"UNAUTHENTICATED","请先选择演示身份"); return u; }
+    private User viewer(HttpServletRequest request) {
         HttpSession session=request.getSession(false);
-        if(session==null || !(session.getAttribute("user") instanceof User u)) throw new ApiException(401,"UNAUTHENTICATED","请先选择演示身份");
-        return u;
+        return session!=null && session.getAttribute("user") instanceof User u?u:null;
     }
     @PostMapping("/api/session/demo") public Map<String,User> login(@Valid @RequestBody SessionRequest body,HttpServletRequest request) {
         if(!demoEnabled) throw new ApiException(403,"DEMO_DISABLED","当前环境不提供演示身份");
@@ -35,8 +35,14 @@ public class ApiController {
     public void logout(HttpServletRequest request) { HttpSession s=request.getSession(false); if(s!=null) s.invalidate(); }
     @GetMapping("/api/categories") public List<Category> categories() { return catalog.categories(); }
     @GetMapping("/api/templates") public Page<TemplateView> templates(@RequestParam(required=false) String categoryId,
-        @RequestParam(defaultValue="1") int page,@RequestParam(defaultValue="20") int pageSize) { return catalog.list(categoryId,page,pageSize); }
-    @GetMapping("/api/templates/{id}") public TemplateView template(@PathVariable String id) { return catalog.detail(id); }
+        @RequestParam(defaultValue="1") int page,@RequestParam(defaultValue="20") int pageSize,@RequestParam(required=false) String scope,HttpServletRequest request) {
+        User u=viewer(request); return catalog.list(categoryId,page,pageSize,u==null?null:u.id(),scope);
+    }
+    @GetMapping("/api/templates/{id}") public TemplateView template(@PathVariable String id,HttpServletRequest request) { User u=viewer(request); return catalog.detail(id,u==null?null:u.id()); }
+    @PostMapping("/api/templates") @ResponseStatus(HttpStatus.CREATED)
+    public TemplateView createTemplate(@RequestBody TemplateDraft body,HttpServletRequest request) { return catalog.create(user(request).id(),body); }
+    @PutMapping("/api/templates/{id}")
+    public TemplateView updateTemplate(@PathVariable String id,@RequestBody TemplateDraft body,HttpServletRequest request) { return catalog.update(id,body,user(request).id()); }
     @PostMapping(value="/api/assets",consumes=MediaType.MULTIPART_FORM_DATA_VALUE) @ResponseStatus(HttpStatus.CREATED)
     public AssetView upload(@RequestParam String templateId,@RequestPart MultipartFile file,HttpServletRequest request) { return assets.upload(user(request).id(),templateId,file); }
     @PostMapping("/api/tasks") public ResponseEntity<?> create(@Valid @RequestBody CreateTask body,HttpServletRequest request) {
@@ -55,9 +61,10 @@ public class ApiController {
         Task t=tasks.owned(id,user(request).id()); if(t.status!=Status.SUCCEEDED || t.resultKey==null) throw ApiException.missing("RESULT");
         return file(t.resultKey,"image/png",false);
     }
-    @GetMapping("/files/samples/{key}") public ResponseEntity<?> sample(@PathVariable String key) throws IOException {
-        if(db.templates().stream().noneMatch(t->t.sampleKey.equals(key))) throw ApiException.missing("RESULT");
-        return file("samples/"+key+".png","image/png",true);
+    @GetMapping("/files/samples/{key}") public ResponseEntity<?> sample(@PathVariable String key,HttpServletRequest request) throws IOException {
+        User u=viewer(request); Boolean pub=catalog.sampleIsPublic(key,u==null?null:u.id());
+        if(pub==null) throw ApiException.missing("RESULT");
+        return file("samples/"+key+".png","image/png",pub);
     }
     private ResponseEntity<?> file(String key,String mime,boolean publicSample) throws IOException {
         Path path=storage.path(key); if(!Files.isRegularFile(path)) throw ApiException.missing("RESULT");

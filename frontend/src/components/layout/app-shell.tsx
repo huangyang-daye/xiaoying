@@ -7,8 +7,15 @@ import { terminal } from "@/lib/api";
 
 const navigation = [
   { href: "/templates", label: "探索模板" },
+  { href: "/templates/manage", label: "模板管理" },
   { href: "/history", label: "我的作品" },
 ];
+
+function isCurrent(href: string, pathname: string) {
+  if (href === "/templates") return pathname === "/templates" || /^\/templates\/(?!manage(?:\/|$))/.test(pathname);
+  if (href === "/history") return pathname === "/history" || pathname.startsWith("/history/") || pathname.startsWith("/tasks/");
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -27,9 +34,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
           <nav className="main-nav" aria-label="主导航">
             {navigation.map(({ href, label }) => {
-              const active = pathname === href || pathname.startsWith(`${href}/`) ||
-                (href === "/history" && pathname.startsWith("/tasks/"));
-              return <Link key={href} href={href} aria-current={active ? "page" : undefined}>{label}</Link>;
+              const current = isCurrent(href, pathname);
+              return <Link key={href} href={href} aria-current={current ? "page" : undefined}>{label}</Link>;
             })}
           </nav>
           <IdentityControl />
