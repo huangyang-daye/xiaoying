@@ -50,6 +50,27 @@ public interface StudioMapper {
         <foreach collection='statuses' item='s' open='(' separator=',' close=')'>#{s}</foreach></if>
         ORDER BY created_at DESC,id DESC LIMIT #{limit} OFFSET #{offset}</script>
         """) List<Task> history(@Param("owner") String owner,@Param("statuses") List<Status> statuses,@Param("limit") int limit,@Param("offset") long offset);
+    @Select("SELECT * FROM app_user WHERE id=#{id}") Account account(String id);
+    @Select("SELECT * FROM app_user WHERE username=#{username}") Account accountByUsername(String username);
+    @Select("SELECT * FROM app_user WHERE email=#{email}") Account accountByEmail(String email);
+    @Insert("""
+        INSERT INTO app_user(id,username,email,password_hash,display_name,avatar_key,created_at,updated_at)
+        VALUES(#{id},#{username},#{email},#{passwordHash},#{displayName},#{avatarKey},#{createdAt},#{updatedAt})
+        """) void insertAccount(Account account);
+    @Update("UPDATE app_user SET display_name=#{displayName},updated_at=#{updatedAt} WHERE id=#{id}") int updateProfile(Account account);
+    @Update("UPDATE app_user SET password_hash=#{passwordHash},updated_at=#{updatedAt} WHERE id=#{id}") int updatePassword(Account account);
+    @Update("UPDATE app_user SET avatar_key=#{avatarKey},updated_at=#{updatedAt} WHERE id=#{id}") int updateAvatar(Account account);
+    @Delete("DELETE FROM app_user WHERE id=#{id}") int deleteAccount(String id);
+    @Select("SELECT * FROM asset WHERE owner_id=#{owner}") List<Asset> assetsByOwner(String owner);
+    @Select("SELECT * FROM production_task WHERE owner_id=#{owner}") List<Task> tasksByOwner(String owner);
+    @Select("SELECT * FROM template WHERE owner_id=#{owner}") List<Template> templatesByOwner(String owner);
+    @Delete("DELETE FROM task_step WHERE task_id=#{id}") int deleteSteps(String id);
+    @Delete("DELETE FROM task_asset WHERE task_id=#{id}") int deleteTaskLinks(String id);
+    @Delete("DELETE FROM task_asset WHERE asset_id=#{id}") int deleteAssetLinks(String id);
+    @Delete("DELETE FROM production_task WHERE id=#{id}") int deleteTask(String id);
+    @Delete("DELETE FROM asset WHERE id=#{id}") int deleteAsset(String id);
+    @Delete("DELETE FROM template WHERE id=#{id}") int deleteTemplate(String id);
+    @Select("SELECT COUNT(*) FROM template WHERE sample_key=#{key}") int templatesUsingSample(String key);
     @Select("""
         <script>SELECT COUNT(*) FROM production_task WHERE owner_id=#{owner}
         <if test='statuses != null and !statuses.isEmpty()'>AND status IN

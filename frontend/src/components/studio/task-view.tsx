@@ -45,7 +45,7 @@ function HistoryContent() {
   const extra = page === 1 ? Object.values(tasks).filter(task => !listed.some(item => item.id === task.id) && (listed.length === 0 || task.createdAt >= listed[0].createdAt)) : [];
   const items = [...extra, ...listed.map(task => tasks[task.id] ?? task)].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const refresh = () => { remote.retry(); void tracker.start(); };
-  return <><div className="section-heading"><p>刷新后从服务器恢复记录，并继续跟踪未完成的任务。</p><button className="button" onClick={refresh}>刷新记录</button></div>
+  return <><p className="muted">当前账户 {session.user?.displayName}（{session.user?.username}）。<Link href="/account">个人设置</Link>可以更改昵称、头像和密码。</p><div className="section-heading"><p>刷新后从服务器恢复记录，并继续跟踪未完成的任务。</p><button className="button" onClick={refresh}>刷新记录</button></div>
     {remote.error && <Feedback error={remote.error} retry={refresh} />}
     {!remote.data && !remote.error && items.length === 0 ? <p role="status">正在读取个人记录…</p> : null}
     {remote.data && items.length === 0 ? <EmptyState title="还没有作品" description="选择喜欢的模板，开始第一次创作吧。" action={{ href: "/templates", label: "探索模板" }} /> : null}

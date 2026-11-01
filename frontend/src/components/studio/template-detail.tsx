@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, type Asset, type Template } from "@/lib/api";
+import { failedUpload, materialRequirement, rejectedSelection, uploadingSelection, type Slot } from "@/lib/upload-slot";
 import { useRemote } from "./use-remote";
 import { RequireSession, useSession, useTasks } from "./provider";
 import { Feedback } from "./catalog";
 import { TaskCard } from "./task-view";
 import { PageHeading } from "@/components/ui/page-heading";
 
-type Slot = { asset?: Asset; uploading: boolean; error?: string };
 function UploadSlot({ index, template, disabled, onChange }: { index: number; template: Template; disabled: boolean; onChange: (index: number, slot: Slot) => void }) {
   const [slot, setSlot] = useState<Slot>({ uploading: false });
   const request = useRef<AbortController | null>(null);
@@ -18,14 +18,14 @@ function UploadSlot({ index, template, disabled, onChange }: { index: number; te
   useEffect(() => () => request.current?.abort(), []);
   async function select(file?: File) {
     if (!file) return; request.current?.abort();
-    if (!template.acceptedMimeTypes.includes(file.type)) { update({ uploading: false, error: "请选择 JPEG 或 PNG 图片。" }); return; }
-    if (file.size === 0 || file.size > template.maxFileSizeBytes) { update({ uploading: false, error: `图片须大于 0，且不超过 ${template.maxFileSizeBytes / 1048576} MiB。` }); return; }
-    const controller = new AbortController(); request.current = controller; update({ uploading: true });
+    const rejected = rejectedSelection(slot, file, template);
+    if (rejected) { update(rejected); return; }
+    const controller = new AbortController(); request.current = controller; const current = slot; update(uploadingSelection(current));
     const form = new FormData(); form.set("file", file); form.set("templateId", template.id);
     try {
       const asset = await api<Asset>("/api/assets", { method: "POST", body: form, signal: controller.signal }, 60000);
       if (!controller.signal.aborted) update({ asset, uploading: false });
-    } catch (error) { if (!controller.signal.aborted) update({ uploading: false, error: (error as Error).message }); }
+    } catch (error) { if (!controller.signal.aborted) update(failedUpload(current, (error as Error).message)); }
   }
   return <div className="upload-slot"><div className="upload-frame">
     <button type="button" className="upload-preview upload-trigger" disabled={disabled} aria-label={`${slot.asset ? "替换" : "上传"}图片 ${index + 1}`} onClick={() => input.current?.click()}>
@@ -65,7 +65,7 @@ function CreationForm({ template }: { template: Template }) {
     } catch (cause) { if (mounted.current) { setError(`${(cause as Error).message} 如响应丢失，任务可能已受理，请先查看我的作品再决定是否重提。`); void tracker.start(); } }
     finally { submitLock.current = false; if (mounted.current) setSubmitting(false); }
   }
-  return <><form onSubmit={event => void submit(event)} className="creation-panel"><h2>上传你的图片</h2><p className="muted">需要 {template.requiredImageCount} 张 · JPEG / PNG · 每张不超过 {template.maxFileSizeBytes / 1048576} MiB</p>
+  return <><form onSubmit={event => void submit(event)} className="creation-panel"><h2>上传你的图片</h2><p className="muted">{materialRequirement(template)}</p>
     <div className="upload-grid">{slots.map((_, index) => <UploadSlot key={index} index={index} template={template} disabled={submitting} onChange={(i, slot) => setSlots(previous => previous.map((item, position) => position === i ? slot : item))} />)}</div>
     <details className="simulation"><summary>演示控制（可选）</summary><label><input type="checkbox" checked={simulation} disabled={submitting} onChange={event => setSimulation(event.target.checked)} />使用自定义模拟参数</label>{simulation && <div className="simulation-fields"><label>失败阶段<select value={failAtStage} disabled={submitting} onChange={event => setFailAtStage(event.target.value)}><option value="NONE">不失败</option><option value="MATERIAL_CHECK">素材检查</option><option value="MOCK_GENERATION">模拟生成</option><option value="RESULT_ASSEMBLY">结果整理</option></select></label>{["素材检查耗时", "模拟生成耗时", "结果整理耗时"].map((label, i) => <label key={label}>{label}（毫秒）<input type="number" min={0} max={30000} step={1} required disabled={submitting} value={Number.isNaN(delays[i]) ? "" : delays[i]} onChange={event => setDelays(values => values.map((value, j) => i === j ? event.target.valueAsNumber : value))} /></label>)}</div>}</details>
     {phase && <p role="status">{phase}</p>}

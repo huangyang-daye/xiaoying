@@ -48,15 +48,17 @@ mvn spring-boot:run
 
 初始化包含 3 个分类、6 个模板，素材数量分别覆盖 1、2、3。启动时 `FileStorage` 用 Java2D 创建六张 PNG 示例图，文件写入数据卷的 samples 目录，内容是本项目自行绘制的图形与文字，不依赖外部图片网站或付费服务。示例图既可作为测试上传素材，也可作为模拟结果，输出不代表真实合成用户上传的图片。
 
-主要表：template_category、template、asset、production_task、task_asset、task_step。历史直接查询 production_task，结果地址和元信息保存在同一任务行。无需另建一套历史或结果业务表。
+主要表：app_user、template_category、template、asset、production_task、task_asset、task_step。历史直接查询 production_task，结果地址和元信息保存在同一任务行。无需另建一套历史或结果业务表。
 
 ## 会话和个人记录
 
+账户保存在 `app_user`。注册提交邮箱、用户名和密码，用户名与邮箱会转成小写并要求唯一；密码使用 PBKDF2-HMAC-SHA256，120000 次迭代，不保存明文。登录接受用户名或邮箱。会话只保存用户 ID，每次读取当前资料，因此昵称和头像修改会立即反映到后续请求。
+
 调用 POST `/api/session/demo`，JSON 为 `{"demoKey":"demo-a"}` 或 `{"demoKey":"demo-b"}`。Java 使用随机的服务端 HTTP Session ID，设置 HttpOnly、SameSite=Lax 的 material_session Cookie；身份切换会失效旧会话并新建会话。请求不得通过 ownerId 指定记录归属。
 
-GET `/api/session` 返回当前身份；POST `/api/session/logout` 注销。所有素材、任务、历史和个人结果都从会话确定身份。无会话为 401；他人资源和缺失资源均为 404。分类、模板和示例封面公开读取。
+GET `/api/session` 返回当前身份；POST `/api/session/logout` 注销。所有素材、任务、历史和个人结果都从会话确定身份。无会话为 401；他人资源和缺失资源均为 404。公共分类、模板和示例封面公开读取。自建模板只对创建者可见。
 
-这是一种明确的演示身份方案：任何人都可以选择 A 或 B，同一演示身份共享记录，不属于生产账号认证。服务重启后会话失效，重新选择相同身份可以读取其 MySQL 历史。关闭 DEMO_ENABLED 后演示登录不可用，本期没有额外密码登录入口。
+演示用户 A/B 会在启动时写入数据库，用户名分别是 demo-a、demo-b，初始密码都是 `demo-password`，同一演示身份共享记录。关闭 DEMO_ENABLED 后不能再一键选择演示身份，仍可用用户名和密码登录。个人设置可修改昵称、上传 JPEG/PNG 头像（最大 2 MB）和重置密码。删除账户需要当前密码，并删除该账户的素材、任务、结果文件和自建模板；若演示账户被删除，下次选择该演示身份会重新创建一个空账户。服务重启后会话失效，重新登录同一账户可以读取其 MySQL 历史。
 
 前端可以通过已配置的同源 `/api` 和 `/files` 代理访问。直接跨端口调用需 `credentials: 'include'`，并把浏览器 origin 加入 ALLOWED_ORIGINS；不要混用 localhost 和 127.0.0.1 的 Cookie。对带 Origin 的写请求校验允许列表。
 
@@ -64,9 +66,15 @@ GET `/api/session` 返回当前身份；POST `/api/session/logout` 注销。所�
 
 | 方法与路径 | 请求参数 | 响应 |
 | --- | --- | --- |
-| POST /api/session/demo | demoKey：demo-a / demo-b | 200，user{id,displayName}，设置 Cookie |
-| GET /api/session | Cookie | 200，user |
+| POST /api/accounts | email、username、password、displayName 可选 | 201，user，设置 Cookie |
+| POST /api/session/login | login（用户名或邮箱）、password | 200，user，设置 Cookie |
+| POST /api/session/demo | demoKey：demo-a / demo-b | 200，user，设置 Cookie |
+| GET /api/session | Cookie | 200，user{id,username,email,displayName,avatarUrl} |
 | POST /api/session/logout | Cookie | 204 |
+| PATCH /api/account | displayName | 200，user |
+| POST /api/account/password | currentPassword、newPassword | 200，user |
+| POST /api/account/avatar | multipart：file | 200，user，avatarUrl |
+| POST /api/account/delete | password | 204，删除账户及个人记录 |
 | GET /api/categories | 无 | 分类数组，id/name/sortOrder |
 | GET /api/templates | categoryId 可选，page=1，pageSize=20 | items/total/page/pageSize |
 | GET /api/templates/{id} | 模板 ID | 标题、描述、分类、coverUrl、requiredImageCount、acceptedMimeTypes、maxFileSizeBytes |
@@ -77,6 +85,7 @@ GET `/api/session` 返回当前身份；POST `/api/session/logout` 注销。所�
 | GET /api/tasks/active | page/pageSize | 当前身份 QUEUED/RUNNING 任务 |
 | GET /files/assets/{id} | Cookie | 本人的上传图片 |
 | GET /files/results/{id} | Cookie，id 为任务 ID | 本人成功任务的 PNG 结果 |
+| GET /files/avatars/{id} | Cookie，且 id 为当前用户 | 本人头像；他人或未设置均为 404 |
 | GET /files/samples/{key} | 模板 coverUrl 指定 key | 公开示例 PNG |
 | GET /actuator/health | 无 | 服务及数据库健康状态 |
 
@@ -136,7 +145,7 @@ pwsh -File backend/scripts/demo.ps1 -DelayMs 5000
 | TASK_WORKER_ENABLED | true；测试关闭自动调度以检查每个边界 |
 | TASK_DISPATCH_INTERVAL_MS | 500，工作线程空闲时的扫描间隔，须为正数 |
 
-与规划草案的具体差异：实现采用服务端会话而非自制签名 Cookie，无需 SESSION_SIGNING_SECRET；用户 ID 使用固定演示身份键；结果元信息内嵌任务表；模板标题和样本引用在任务创建时固定，素材数量可从关联记录恢复。实现契约以本文和代码为准。
+与规划草案的具体差异：实现采用服务端会话而非自制签名 Cookie，无需 SESSION_SIGNING_SECRET；演示用户沿用固定 ID，注册用户使用 32 位随机 ID；结果元信息内嵌任务表；模板标题和样本引用在任务创建时固定，素材数量可从关联记录恢复。实现契约以本文和代码为准。
 
 ## 测试、边界和后续工作
 

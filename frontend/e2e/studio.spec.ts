@@ -12,13 +12,24 @@ test("real Java workflow, multi-task recovery and identity isolation", async ({ 
   await expect(submit).toBeDisabled();
   const input = page.getByLabel("选择图片 1");
   await expect(input).toBeHidden();
+  await expect(page.getByText("需要 1 张 · JPEG / PNG · 每张不超过 5 MiB")).toBeVisible();
   await input.setInputFiles({ name: "invalid.txt", mimeType: "text/plain", buffer: Buffer.from("invalid") });
-  await expect(page.getByRole("alert").filter({ hasText: "请选择 JPEG" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "请选择 JPEG 或 PNG" })).toBeVisible();
   const sample = await page.request.get("/files/samples/pet"); expect(sample.ok()).toBeTruthy();
   const image = { name: "pet.png", mimeType: "image/png", buffer: await sample.body() };
   const uploadBox = page.getByRole("button", { name: "上传图片 1", exact: true });
   await uploadBox.hover(); await expect(uploadBox.getByText("单击上传文件")).toHaveCSS("opacity", "1");
   const chooser = page.waitForEvent("filechooser"); await uploadBox.click(); await (await chooser).setFiles(image); await expect(submit).toBeEnabled();
+  const preview = page.getByRole("img", { name: "素材 1 预览" });
+  await expect(preview).toBeVisible();
+  await input.setInputFiles({ name: "invalid.txt", mimeType: "text/plain", buffer: Buffer.from("still-invalid") });
+  await expect(page.getByRole("alert").filter({ hasText: "请选择 JPEG 或 PNG" })).toBeVisible();
+  await expect(preview).toBeVisible(); await expect(submit).toBeEnabled();
+  await page.route("**/api/assets", route => route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "图片内容损坏或无法读取" }) }));
+  await input.setInputFiles(image);
+  await expect(page.getByRole("alert").filter({ hasText: "图片内容损坏或无法读取" })).toBeVisible();
+  await expect(preview).toBeVisible(); await expect(submit).toBeEnabled();
+  await page.unroute("**/api/assets");
   await page.getByRole("heading", { name: "上传你的图片" }).hover();
   await expect(page.getByRole("button", { name: "移除图片 1" })).toHaveCSS("opacity", "0");
   await page.getByRole("button", { name: "替换图片 1" }).hover();
@@ -64,6 +75,7 @@ test("real Java workflow, multi-task recovery and identity isolation", async ({ 
 test("two-image template and refresh while running; terminal tasks stop polling", async ({ page }) => {
   await page.goto("/templates/demo-postcard");
   await page.getByLabel("演示身份").selectOption("demo-a");
+  await expect(page.getByText("需要 2 张 · JPEG / PNG · 每张不超过 5 MiB")).toBeVisible();
   const submit = page.getByRole("button", { name: "提交制作任务", exact: true });
   const sample = await page.request.get("/files/samples/postcard");
   const file = { name: "sample.png", mimeType: "image/png", buffer: await sample.body() };

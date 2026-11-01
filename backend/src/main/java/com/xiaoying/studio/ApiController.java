@@ -15,20 +15,46 @@ import com.xiaoying.studio.Models.*;
 @RestController
 public class ApiController {
     private final CatalogService catalog; private final AssetService assets; private final TaskService tasks;
-    private final FileStorage storage; private final boolean demoEnabled;
-    public ApiController(CatalogService catalog,AssetService assets,TaskService tasks,FileStorage storage,@Value("${app.demo-enabled}") boolean demoEnabled) {
-        this.catalog=catalog; this.assets=assets; this.tasks=tasks; this.storage=storage; this.demoEnabled=demoEnabled;
+    private final AccountService accounts; private final FileStorage storage; private final boolean demoEnabled;
+    public ApiController(CatalogService catalog,AssetService assets,TaskService tasks,AccountService accounts,FileStorage storage,@Value("${app.demo-enabled}") boolean demoEnabled) {
+        this.catalog=catalog; this.assets=assets; this.tasks=tasks; this.accounts=accounts; this.storage=storage; this.demoEnabled=demoEnabled;
     }
-    private User user(HttpServletRequest request) { User u=viewer(request); if(u==null) throw new ApiException(401,"UNAUTHENTICATED","请先选择演示身份"); return u; }
+    private User user(HttpServletRequest request) { User u=viewer(request); if(u==null) throw new ApiException(401,"UNAUTHENTICATED","请先登录或选择演示身份"); return u; }
     private User viewer(HttpServletRequest request) {
         HttpSession session=request.getSession(false);
-        return session!=null && session.getAttribute("user") instanceof User u?u:null;
+        if(session==null || !(session.getAttribute("userId") instanceof String id)) return null;
+        try { return accounts.require(id); }
+        catch(ApiException e) { session.invalidate(); return null; }
+    }
+    private void establish(HttpServletRequest request,User user) {
+        HttpSession old=request.getSession(false); if(old!=null) old.invalidate();
+        request.getSession(true).setAttribute("userId",user.id());
+    }
+    @PostMapping("/api/accounts") @ResponseStatus(HttpStatus.CREATED)
+    public Map<String,User> register(@RequestBody RegisterRequest body,HttpServletRequest request) {
+        User u=accounts.register(body); establish(request,u); return Map.of("user",u);
+    }
+    @PostMapping("/api/session/login") public Map<String,User> passwordLogin(@RequestBody LoginRequest body,HttpServletRequest request) {
+        User u=accounts.login(body); establish(request,u); return Map.of("user",u);
+    }
+    @PatchMapping("/api/account") public Map<String,User> rename(@RequestBody ProfileUpdate body,HttpServletRequest request) {
+        return Map.of("user",accounts.rename(user(request).id(),body.displayName()));
+    }
+    @PostMapping("/api/account/password") public Map<String,User> password(@RequestBody PasswordChange body,HttpServletRequest request) {
+        return Map.of("user",accounts.changePassword(user(request).id(),body.currentPassword(),body.newPassword()));
+    }
+    @PostMapping(value="/api/account/avatar",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Map<String,User> avatar(@RequestPart MultipartFile file,HttpServletRequest request) {
+        return Map.of("user",accounts.changeAvatar(user(request).id(),file));
+    }
+    @PostMapping("/api/account/delete") @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteAccount(@RequestBody DeleteAccount body,HttpServletRequest request) {
+        accounts.delete(user(request).id(),body.password());
+        HttpSession session=request.getSession(false); if(session!=null) session.invalidate();
     }
     @PostMapping("/api/session/demo") public Map<String,User> login(@Valid @RequestBody SessionRequest body,HttpServletRequest request) {
         if(!demoEnabled) throw new ApiException(403,"DEMO_DISABLED","当前环境不提供演示身份");
-        User u=switch(body.demoKey()) { case "demo-a" -> new User("demo-a","演示用户 A"); case "demo-b" -> new User("demo-b","演示用户 B"); default -> throw ApiException.invalid("demoKey 仅支持 demo-a 或 demo-b"); };
-        HttpSession old=request.getSession(false); if(old!=null) old.invalidate();
-        request.getSession(true).setAttribute("user",u); return Map.of("user",u);
+        User u=accounts.ensureDemo(body.demoKey()); establish(request,u); return Map.of("user",u);
     }
     @GetMapping("/api/session") public Map<String,User> session(HttpServletRequest request) { return Map.of("user",user(request)); }
     @PostMapping("/api/session/logout") @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -60,6 +86,11 @@ public class ApiController {
     @GetMapping("/files/results/{id}") public ResponseEntity<?> result(@PathVariable String id,HttpServletRequest request) throws IOException {
         Task t=tasks.owned(id,user(request).id()); if(t.status!=Status.SUCCEEDED || t.resultKey==null) throw ApiException.missing("RESULT");
         return file(t.resultKey,"image/png",false);
+    }
+    @GetMapping("/files/avatars/{id}") public ResponseEntity<?> avatar(@PathVariable String id,HttpServletRequest request) throws IOException {
+        if(!user(request).id().equals(id)) throw ApiException.missing("AVATAR");
+        String key=accounts.avatarKey(id);
+        return file(key,key.endsWith(".png")?"image/png":"image/jpeg",false);
     }
     @GetMapping("/files/samples/{key}") public ResponseEntity<?> sample(@PathVariable String key,HttpServletRequest request) throws IOException {
         User u=viewer(request); Boolean pub=catalog.sampleIsPublic(key,u==null?null:u.id());

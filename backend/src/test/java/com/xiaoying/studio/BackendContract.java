@@ -217,4 +217,75 @@ abstract class BackendContract {
             assertEquals(1,winners); assertEquals(Status.RUNNING,db.task(id).status);
         } finally { pool.shutdownNow(); }
     }
+    @Test void nicknameUpdateAcceptsConfiguredBrowserOrigin() throws Exception {
+        try {
+            mvc.perform(patch("/api/account").session(a).header("Origin","http://localhost:3000").contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsBytes(Map.of("displayName","演示甲")))).andExpect(status().isOk()).andExpect(jsonPath("$.user.displayName").value("演示甲"));
+            mvc.perform(patch("/api/account").session(a).header("Origin","http://evil.example").contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsBytes(Map.of("displayName","被拒绝")))).andExpect(status().isForbidden());
+            mvc.perform(get("/api/session").session(a)).andExpect(jsonPath("$.user.displayName").value("演示甲"));
+        } finally { jdbc.update("UPDATE app_user SET display_name=? WHERE id='demo-a'","演示用户 A"); }
+    }
+    @Test void accountsRegisterSignInUpdateAndDelete() throws Exception {
+        mvc.perform(post("/api/accounts").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+            "email","not-an-email","username","studio-maker","password","secret-pass")))).andExpect(status().isBadRequest());
+        mvc.perform(post("/api/accounts").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+            "email","maker@example.com","username","demo-a","password","secret-pass")))).andExpect(status().isBadRequest());
+        try {
+            var created=mvc.perform(post("/api/accounts").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "email","Maker@Example.com","username","Studio-Maker","password","secret-pass","displayName","创作者"))))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.user.username").value("studio-maker"))
+                .andExpect(jsonPath("$.user.email").value("maker@example.com")).andExpect(jsonPath("$.user.displayName").value("创作者"))
+                .andExpect(jsonPath("$.user.avatarUrl").value(nullValue())).andReturn();
+            String userId=json.readTree(created.getResponse().getContentAsByteArray()).get("user").get("id").asText();
+            MockHttpSession session=(MockHttpSession)created.getRequest().getSession(false);
+            mvc.perform(post("/api/accounts").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "email","other@example.com","username","studio-maker","password","secret-pass")))).andExpect(status().isConflict());
+            mvc.perform(post("/api/session/logout").session(session)).andExpect(status().isNoContent());
+            mvc.perform(post("/api/session/login").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "login","studio-maker","password","wrong-pass")))).andExpect(status().isUnauthorized());
+            session=(MockHttpSession)mvc.perform(post("/api/session/login").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "login","maker@example.com","password","secret-pass")))).andExpect(status().isOk()).andExpect(jsonPath("$.user.id").value(userId)).andReturn().getRequest().getSession(false);
+            mvc.perform(patch("/api/account").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of("displayName","新昵称"))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.user.displayName").value("新昵称"));
+            mvc.perform(get("/api/session").session(session)).andExpect(jsonPath("$.user.displayName").value("新昵称"));
+            mvc.perform(post("/api/account/password").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "currentPassword","secret-pass","newPassword","short")))).andExpect(status().isBadRequest());
+            mvc.perform(post("/api/account/password").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "currentPassword","secret-pass","newPassword","new-secret-9")))).andExpect(status().isOk());
+            mvc.perform(post("/api/session/login").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "login","studio-maker","password","secret-pass")))).andExpect(status().isUnauthorized());
+            mvc.perform(multipart("/api/account/avatar").file(new MockMultipartFile("file","face.png","image/png",image())).session(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.user.avatarUrl").value("/files/avatars/"+userId));
+            mvc.perform(get("/files/avatars/"+userId).session(b)).andExpect(status().isNotFound());
+            mvc.perform(get("/files/avatars/"+userId).session(session)).andExpect(status().isOk()).andExpect(content().contentType("image/png"));
+            mvc.perform(post("/api/templates").session(session).contentType(MediaType.APPLICATION_JSON).content(templateBody("maker-card","创作者卡片",null,null))).andExpect(status().isCreated());
+            String asset=json.readTree(mvc.perform(multipart("/api/assets").file(new MockMultipartFile("file","test.png","image/png",image())).param("templateId","demo-pet").session(session))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsByteArray()).get("assetId").asText();
+            String taskId=json.readTree(mvc.perform(post("/api/tasks").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "templateId","demo-pet","assetIds",List.of(asset),"simulation",Map.of("failAtStage","NONE","materialCheckDelayMs",0,"mockGenerationDelayMs",0,"resultAssemblyDelayMs",0)))))
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsByteArray()).get("taskId").asText();
+            processor.runNext();
+            mvc.perform(post("/api/account/delete").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of("password","secret-pass")))).andExpect(status().isBadRequest());
+            mvc.perform(get("/api/tasks/"+taskId).session(session)).andExpect(status().isOk());
+            mvc.perform(post("/api/account/delete").session(session).contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of("password","new-secret-9")))).andExpect(status().isNoContent());
+            mvc.perform(get("/api/session").session(session)).andExpect(status().isUnauthorized());
+            mvc.perform(get("/api/tasks/"+taskId).session(b)).andExpect(status().isNotFound());
+            mvc.perform(get("/api/templates/maker-card")).andExpect(status().isNotFound());
+            mvc.perform(post("/api/session/login").contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(Map.of(
+                "login","studio-maker","password","new-secret-9")))).andExpect(status().isUnauthorized());
+            assertEquals(0L,jdbc.queryForObject("SELECT COUNT(*) FROM app_user WHERE username='studio-maker'",Long.class));
+            assertEquals(0L,jdbc.queryForObject("SELECT COUNT(*) FROM production_task WHERE id=?",Long.class,taskId));
+        } finally { removeAccount("studio-maker"); jdbc.update("DELETE FROM template WHERE id='maker-card'"); }
+    }
+    void removeAccount(String username) {
+        for(String id:jdbc.queryForList("SELECT id FROM app_user WHERE username=?",String.class,username)) {
+            jdbc.update("DELETE FROM task_step WHERE task_id IN (SELECT id FROM production_task WHERE owner_id=?)",id);
+            jdbc.update("DELETE FROM task_asset WHERE task_id IN (SELECT id FROM production_task WHERE owner_id=?)",id);
+            jdbc.update("DELETE FROM production_task WHERE owner_id=?",id);
+            jdbc.update("DELETE FROM asset WHERE owner_id=?",id);
+            jdbc.update("DELETE FROM template WHERE owner_id=?",id);
+            jdbc.update("DELETE FROM app_user WHERE id=?",id);
+        }
+    }
 }

@@ -1,6 +1,8 @@
 package com.xiaoying.studio;
 
 import java.time.Instant;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.xiaoying.studio.Models.*;
@@ -8,13 +10,17 @@ import static com.xiaoying.studio.Models.STAGES;
 
 @Service
 public class TaskLifecycle {
+    private static final Logger log = LoggerFactory.getLogger(TaskLifecycle.class);
     private final StudioMapper db;
     public TaskLifecycle(StudioMapper db) { this.db=db; }
     @Transactional
     public Task claimNext() {
         String id=db.nextQueued();
-        if(id==null || db.claim(id)!=1) return null;
+        if(id==null) return null;
+        log.info("任务 {} 开始认领", id);
+        if(db.claim(id)!=1) { log.info("任务 {} 认领结束，未获得执行权", id); return null; }
         Step first=db.steps(id).get(0); first.status=StepStatus.RUNNING; first.startedAt=Instant.now(); db.updateStep(first);
+        log.info("任务 {} 认领结束，状态 RUNNING，阶段 MATERIAL_CHECK", id);
         return db.task(id);
     }
     @Transactional
@@ -34,7 +40,9 @@ public class TaskLifecycle {
     }
     @Transactional
     public void fail(String id,String code,String message) {
-        Task t=db.task(id); if(t==null || t.status!=Status.RUNNING) return;
+        Task t=db.task(id);
+        if(t==null || t.status!=Status.RUNNING) { log.info("任务 {} 跳过失败记录，当前状态 {}", id, t==null?"缺失":t.status); return; }
+        log.info("任务 {} 开始记录失败，阶段 {}，代码 {}", id, t.currentStage, code);
         Instant now=Instant.now(); t.status=Status.FAILED; t.failureStage=t.currentStage;
         t.errorCode=code; t.errorMessage=message; t.finishedAt=now; t.updatedAt=now;
         for(Step s:db.steps(id)) {
@@ -42,5 +50,6 @@ public class TaskLifecycle {
             else if(s.status==StepStatus.PENDING) { s.status=StepStatus.SKIPPED; s.finishedAt=now; db.updateStep(s); }
         }
         if(db.updateTask(t)!=1) throw new IllegalStateException("Concurrent task update");
+        log.info("任务 {} 失败记录结束，状态 FAILED，阶段 {}", id, t.failureStage);
     }
 }

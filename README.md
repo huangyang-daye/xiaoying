@@ -10,7 +10,7 @@
 - 上传：JPEG/PNG 校验、服务端保存、预览、替换、移除和错误反馈；前后端校验数量、类型和大小。
 - 制作：受理后返回任务 ID，由 Java 后台顺序执行“素材检查 → 模拟生成 → 结果整理”，支持连续提交、多任务排队及指定阶段失败。
 - 状态：独立跟踪各任务，查询异常保留原状态并支持恢复；终态停止轮询，刷新后从 Java 恢复历史和活动任务。
-- 身份与结果：A/B 演示身份隔离素材、任务和结果；成功结果可预览，失败记录保留阶段与原因。
+- 身份与结果：可用邮箱、用户名和密码注册；也能一键进入演示用户 A/B。素材、任务和结果按账户隔离，成功结果可预览。
 - 工程交付：数据库迁移和初始化数据、容器配置、关键测试及 GitHub Actions 已提供。
 
 ## 技术版本
@@ -59,12 +59,21 @@ docker compose down
 
 ## 演示流程
 
-1. 打开网站，顶部选择演示用户 A。浏览分类，选择模板并上传规定数量的 JPEG/PNG，每张不超过 5 MiB。可先保存模板封面作为测试图片。
+演示账户：
+
+| 账户 | 用户名 | 邮箱 | 密码 |
+| --- | --- | --- | --- |
+| 演示用户 A | demo-a | demo-a@studio.local | demo-password |
+| 演示用户 B | demo-b | demo-b@studio.local | demo-password |
+
+顶部可以直接选择这两个身份，也可以在登录页用上表的用户名或邮箱加密码进入。同一演示账户的记录是共享的。
+
+1. 打开网站。可在顶部选择演示用户 A，或打开「注册」依次填写邮箱、用户名和密码。浏览分类，选择模板并上传规定数量的 JPEG/PNG，每张不超过 5 MiB。可先保存模板封面作为测试图片。
 2. 提交制作，收到任务 ID 后可继续浏览或再次提交。默认三阶段耗时分别为 1000、4000、1000 ms；单个 Java 工作线程执行，其余任务排队。
 3. 在详情页展开“演示控制”，启用自定义参数，可指定素材检查、模拟生成或结果整理失败，并为每阶段设置 0～30000 ms 的整数耗时。失败后后续步骤跳过。
 4. 前往“我的作品”查看状态、阶段和失败原因；成功后点击图片预览结果。结果是预置示例图，不进行真实图片合成。
 5. 连续提交两个任务，或在处理中刷新页面，观察独立跟踪和恢复。关闭页面不影响 Java 执行；查询网络异常不会把任务改为失败，可点击“恢复查询”。
-6. 切换用户 B，查看独立记录；切回 A 可恢复 A 的历史。同一个演示身份由所有选择它的人共享，不能用于生产账号认证。
+6. 切换用户 B，查看独立记录；切回 A 可恢复 A 的历史。自行注册的账户只对本人可见。个人设置可修改昵称、头像和密码；页面最下方可删除账户，并同时删除该账户的素材、任务、结果和自建模板。
 
 API 演示脚本及指定阶段失败、耗时控制命令见 [后端模拟演示](backend/README.md#异步流程及模拟参数)。演示脚本要求 PowerShell 7；正式验收的项目构建、测试和执行应置于容器隔离环境中。
 
@@ -72,11 +81,15 @@ API 演示脚本及指定阶段失败、耗时控制命令见 [后端模拟演�
 
 任务整体状态为 `QUEUED → RUNNING → SUCCEEDED | FAILED`。三个执行阶段为 `MATERIAL_CHECK → MOCK_GENERATION → RESULT_ASSEMBLY`，每阶段独立落库，失败时记录失败阶段与原因，后续步骤置为 `SKIPPED`。Java 通过数据库队列认领任务并执行，查询请求只读取状态。
 
-Java 使用服务端 HTTP Session 和 HttpOnly、SameSite=Lax 的 `material_session` Cookie 确定身份。客户端不能用 `ownerId` 指定资源归属；无会话返回 401，他人素材、任务或结果返回 404。模板及示例图片公开访问。
+Java 使用服务端 HTTP Session 和 HttpOnly、SameSite=Lax 的 `material_session` Cookie 确定身份。密码以 PBKDF2-HMAC-SHA256 保存，不保存明文。客户端不能用 `ownerId` 指定资源归属；无会话返回 401，他人素材、任务或结果返回 404。公共模板及示例图片公开访问，自建模板只对创建者可见。
 
 | 接口 | 主要输入与输出 |
 | --- | --- |
+| POST /api/accounts | 邮箱、用户名、密码、可选昵称；201 返回 user 并设置 Cookie |
+| POST /api/session/login | 用户名或邮箱、密码；返回 user 并设置 Cookie |
 | POST /api/session/demo | 输入 demoKey：demo-a / demo-b；返回 user 并设置 Cookie |
+| PATCH /api/account、POST /api/account/password、POST /api/account/avatar | 修改昵称、重置密码、上传头像 |
+| POST /api/account/delete | 当前密码；删除账户及其素材、任务、结果和自建模板 |
 | GET /api/categories、GET /api/templates | 分类列表；模板支持 categoryId、page、pageSize，返回 items/total/page/pageSize |
 | GET /api/templates/{id} | 返回标题、描述、coverUrl、requiredImageCount、acceptedMimeTypes、maxFileSizeBytes |
 | POST /api/assets | multipart：templateId、file；返回 assetId、previewUrl、mimeType、sizeBytes |
@@ -128,10 +141,10 @@ java -jar target/material-studio-0.1.0.jar
 
 ## 限制与未完成项
 
-- 当前为单后端实例和公开 A/B 演示身份；没有生产认证、配额、真实 AI 或素材管理后台。
-- 服务重启后会话失效，重新选择相同身份可读持久化历史。遗留 `RUNNING` 任务归档为 `FAILED / RESTART_INTERRUPTED`，`QUEUED` 任务继续调度；不自动续跑或重试。
+- 当前为单后端实例。注册账户使用邮箱、用户名和密码；演示用户 A/B 仍是共享的公开身份。没有配额、真实 AI、第三方登录或素材管理后台。
+- 服务重启后会话失效，重新登录或选择相同演示身份可读持久化历史。遗留 `RUNNING` 任务归档为 `FAILED / RESTART_INTERRUPTED`，`QUEUED` 任务继续调度；不自动续跑或重试。删除账户会删除该账户的个人记录；未提供单独的素材删除及孤立文件自动清理。
 - 未实现提交幂等；如果提交响应丢失，应先查历史再决定重提。数据库故障可能留下 `RUNNING`，恢复数据库后需重启归档。
-- 未提供素材/结果删除及孤立文件自动清理。前端开发依赖的兼容性和审计边界见 [前端说明](frontend/README.md#windows-文件占用)。
+- 前端开发依赖的兼容性和审计边界见 [前端说明](frontend/README.md#windows-文件占用)。
 
 ## 部署与回滚
 

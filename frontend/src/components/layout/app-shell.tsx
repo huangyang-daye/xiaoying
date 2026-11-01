@@ -9,6 +9,7 @@ const navigation = [
   { href: "/templates", label: "探索模板" },
   { href: "/templates/manage", label: "模板管理" },
   { href: "/history", label: "我的作品" },
+  { href: "/account", label: "个人设置" },
 ];
 
 function isCurrent(href: string, pathname: string) {

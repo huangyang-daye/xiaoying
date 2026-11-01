@@ -13,8 +13,17 @@ public final class Models {
     public enum StepStatus { PENDING, RUNNING, SUCCEEDED, FAILED, SKIPPED }
     public static final List<Stage> STAGES = List.of(Stage.MATERIAL_CHECK, Stage.MOCK_GENERATION, Stage.RESULT_ASSEMBLY);
     public static String text(String value) { if(value==null) return null; String trimmed=value.trim(); return trimmed.isEmpty()?null:trimmed; }
-    public record User(String id, String displayName) {}
+    public record User(String id, String username, String email, String displayName, String avatarUrl) {}
+    public static class Account {
+        public String id, username, email, passwordHash, displayName, avatarKey;
+        public Instant createdAt, updatedAt;
+    }
     public record SessionRequest(@NotBlank String demoKey) {}
+    public record RegisterRequest(String email, String username, String password, String displayName) {}
+    public record LoginRequest(String login, String password) {}
+    public record ProfileUpdate(String displayName) {}
+    public record PasswordChange(String currentPassword, String newPassword) {}
+    public record DeleteAccount(String password) {}
     public record Simulation(Failure failAtStage, @Min(0) @Max(30000) Integer materialCheckDelayMs,
                              @Min(0) @Max(30000) Integer mockGenerationDelayMs,
                              @Min(0) @Max(30000) Integer resultAssemblyDelayMs) {}

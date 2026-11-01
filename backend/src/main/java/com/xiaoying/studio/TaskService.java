@@ -2,6 +2,8 @@ package com.xiaoying.studio;
 
 import java.time.Instant;
 import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.*;
@@ -10,6 +12,7 @@ import static com.xiaoying.studio.Models.STAGES;
 
 @Service
 public class TaskService {
+    private static final Logger log = LoggerFactory.getLogger(TaskService.class);
     private final StudioMapper db; private final CatalogService catalog; private final AssetService assets;
     private final boolean simulationEnabled; private final int checkDelay,generationDelay,assemblyDelay;
     public TaskService(StudioMapper db,CatalogService catalog,AssetService assets,
@@ -25,6 +28,11 @@ public class TaskService {
     }
     @Transactional
     public Task create(String owner,CreateTask request) {
+        log.info("开始受理制作任务，用户 {}，模板 {}", owner, request.templateId());
+        try { return accept(owner, request); }
+        catch(RuntimeException e) { log.info("制作任务受理结束，未创建任务：{}", e.getMessage()); throw e; }
+    }
+    private Task accept(String owner,CreateTask request) {
         Template template=catalog.require(request.templateId(),owner);
         var ids=request.assetIds();
         if(ids.size()!=template.requiredImageCount || new HashSet<>(ids).size()!=ids.size()) throw new ApiException(400,"INVALID_ASSET_COUNT","图片数量须符合模板要求且不可重复");
@@ -44,6 +52,7 @@ public class TaskService {
         t.createdAt=Instant.now(); t.updatedAt=t.createdAt; db.insertTask(t);
         for(int i=0;i<ids.size();i++) db.linkAsset(t.id,ids.get(i),i);
         for(int i=0;i<STAGES.size();i++) db.insertStep(t.id,STAGES.get(i),i+1);
+        log.info("制作任务 {} 受理完成，状态 QUEUED，阶段 NOT_STARTED", t.id);
         return t;
     }
     public Task owned(String id,String owner) { Task t=db.task(id); if(t==null || !owner.equals(t.ownerId)) throw ApiException.missing("TASK"); return t; }

@@ -11,10 +11,11 @@ import org.springframework.web.servlet.config.annotation.*;
 
 @Configuration
 public class WebConfiguration implements WebMvcConfigurer {
+    private static final Set<String> WRITE_METHODS = Set.of("POST","PUT","PATCH","DELETE");
     private final Set<String> origins;
     public WebConfiguration(@Value("${app.allowed-origins}") String origins) { this.origins=Arrays.stream(origins.split(",")).map(String::trim).collect(Collectors.toSet()); }
     @Override public void addCorsMappings(CorsRegistry registry) {
-        registry.addMapping("/**").allowedOrigins(origins.toArray(String[]::new)).allowedMethods("GET","POST","OPTIONS").allowCredentials(true);
+        registry.addMapping("/**").allowedOrigins(origins.toArray(String[]::new)).allowedMethods("GET","HEAD","POST","PUT","PATCH","DELETE","OPTIONS").allowCredentials(true);
     }
     @Override public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new HandlerInterceptor() {
@@ -22,7 +23,7 @@ public class WebConfiguration implements WebMvcConfigurer {
                 response.setHeader("X-Content-Type-Options","nosniff");
                 response.setHeader("Cache-Control","no-store");
                 String origin=request.getHeader("Origin");
-                if("POST".equals(request.getMethod()) && origin!=null && !origins.contains(origin))
+                if(WRITE_METHODS.contains(request.getMethod()) && origin!=null && !origins.contains(origin))
                     throw new ApiException(403,"ORIGIN_NOT_ALLOWED","请求来源不被允许");
                 return true;
             }

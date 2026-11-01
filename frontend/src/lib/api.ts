@@ -1,4 +1,4 @@
-export type User = { id: string; displayName: string };
+export type User = { id: string; username: string; email: string; displayName: string; avatarUrl: string | null };
 export type Category = { id: string; name: string };
 export type Page<T> = { items: T[]; total: number; page: number; pageSize: number };
 export type Template = { id: string; categoryId: string; title: string; description: string; coverUrl: string; requiredImageCount: number; acceptedMimeTypes: string[]; maxFileSizeBytes: number; storedCoverUrl: string | null; sampleResultUrl: string | null; ownerId: string | null };
@@ -21,7 +21,8 @@ export async function api<T>(path: string, options: RequestInit = {}, timeout = 
     if (!response.ok) {
       const error = await response.json().catch(() => null);
       signal.throwIfAborted();
-      if (response.status === 401 && path !== "/api/session" && typeof window !== "undefined") window.dispatchEvent(new Event("studio:session-expired"));
+      const anonymousAuth = path === "/api/session" || path === "/api/session/login" || path === "/api/accounts";
+      if (response.status === 401 && !anonymousAuth && typeof window !== "undefined") window.dispatchEvent(new Event("studio:session-expired"));
       throw new ApiError(error?.message ?? `请求失败（${response.status}）`, response.status);
     }
     return response.status === 204 ? undefined as T : await response.json() as T;
