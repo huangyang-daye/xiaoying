@@ -10,6 +10,8 @@ node_modules/
 out/
 .turbo/
 *.tsbuildinfo
+test-results/
+playwright-report/
 
 # Java build output
 target/
