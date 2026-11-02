@@ -44,3 +44,8 @@ app:
     enabled: ${TASK_WORKER_ENABLED:true}
     interval-ms: ${TASK_DISPATCH_INTERVAL_MS:500}
     concurrency: ${TASK_WORKER_CONCURRENCY:4}
+    max-attempts: ${TASK_MAX_ATTEMPTS:3}
+    retry-base-delay-ms: ${TASK_RETRY_BASE_DELAY_MS:1000}
+    retry-max-delay-ms: ${TASK_RETRY_MAX_DELAY_MS:30000}
+    lease-ms: ${TASK_LEASE_MS:120000}
+    heartbeat-interval-ms: ${TASK_HEARTBEAT_INTERVAL_MS:1000}

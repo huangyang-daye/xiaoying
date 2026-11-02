@@ -8,6 +8,7 @@
 
 - 模板：3 个分类、6 个模板，覆盖 1、2、3 张图片要求，支持分类筛选和详情；另提供自建私有模板的创建和编辑。
 - 上传：JPEG/PNG 校验、服务端保存、预览、替换、移除和错误反馈；前后端校验数量、类型和大小。
+- 可靠性：幂等受理、阶段检查点续跑、持久化退避重试、执行租约及尝试历史；前端可恢复尚未确认的提交。
 - 制作：受理后返回任务 ID，由 Java 后台顺序执行“素材检查 → 模拟生成 → 结果整理”，支持连续提交、多任务并行及指定阶段失败。
 - 状态：独立跟踪各任务，查询异常保留原状态并支持恢复；终态停止轮询，刷新后从 Java 恢复历史和活动任务。
 - 身份与结果：可用邮箱、用户名和密码注册；也能一键进入演示用户 A/B。素材、任务和结果按账户隔离，成功结果可预览。
@@ -79,7 +80,7 @@ API 演示脚本及指定阶段失败、耗时控制命令见 [后端模拟演�
 
 ## 状态、接口与身份
 
-任务整体状态为 `QUEUED → RUNNING → SUCCEEDED | FAILED`。三个执行阶段为 `MATERIAL_CHECK → MOCK_GENERATION → RESULT_ASSEMBLY`，每阶段独立落库，失败时记录失败阶段与原因，后续步骤置为 `SKIPPED`。Java 通过数据库队列认领任务并执行，查询请求只读取状态。
+任务整体状态为 `QUEUED → RUNNING → SUCCEEDED | FAILED`。三个执行阶段为 `MATERIAL_CHECK → MOCK_GENERATION → RESULT_ASSEMBLY`，每阶段独立落库，最终失败时记录失败阶段与原因，后续步骤置为 `SKIPPED`。Java 通过数据库队列认领任务并执行，查询请求只读取状态。
 
 Java 使用服务端 HTTP Session 和 HttpOnly、SameSite=Lax 的 `material_session` Cookie 确定身份。密码以 PBKDF2-HMAC-SHA256 保存，不保存明文。客户端不能用 `ownerId` 指定资源归属；无会话返回 401，他人素材、任务或结果返回 404。公共模板及示例图片公开访问，自建模板只对创建者可见。
 
@@ -93,7 +94,7 @@ Java 使用服务端 HTTP Session 和 HttpOnly、SameSite=Lax 的 `material_sess
 | GET /api/categories、GET /api/templates | 分类列表；模板支持 categoryId、page、pageSize，返回 items/total/page/pageSize |
 | GET /api/templates/{id} | 返回标题、描述、coverUrl、requiredImageCount、acceptedMimeTypes、maxFileSizeBytes |
 | POST /api/assets | multipart：templateId、file；返回 assetId、previewUrl、mimeType、sizeBytes |
-| POST /api/tasks | 输入 templateId、assetIds、可选 simulation；202 返回 taskId、status、currentStage、queryUrl |
+| POST /api/tasks | 输入 templateId、assetIds、可选 simulation；支持 Idempotency-Key，同键同参数返回原任务，参数冲突返回 409；202 返回任务信息 |
 | GET /api/tasks/{id} | 返回任务状态、阶段、steps、failureStage、errorMessage、result 及时间 |
 | GET /api/tasks、GET /api/tasks/active | 当前身份的分页历史、未结束任务 |
 | GET /files/assets/{id}、GET /files/results/{id} | 当前身份的素材、成功结果图片 |
@@ -127,21 +128,31 @@ java -jar target/material-studio-0.1.0.jar
 
 `.github/workflows/` 在 push / pull request 时分别执行前端 lint、类型、状态测试与构建，Java 测试与构建，以及整站 Compose 和浏览器联调。
 
-当前验收实现为 `730d70d`，2026-11-02 在容器隔离环境完成以下验证：
+本次提交在 `730d70d` 的并发事务基线上完成幂等、续跑和自动重试扩展。2026-11-02 的容器验证结果：
 
 | 检查 | 结果 |
 | --- | --- |
 | 前端 lint、TypeScript 类型检查、生产构建 | 通过 |
-| 前端状态与接口测试 | 8 项通过，包含并发完成时的游标恢复 |
-| Java 完整 verify 与 jar 构建 | 39 项通过：18 项 MySQL 契约、18 项 H2 契约、2 项调度器测试、1 项 Docker 检查；0 失败、0 跳过 |
+| 前端状态与接口测试 | 13 项通过，包含并发游标恢复、提交意图持久化、账户隔离和普通 HTTP 随机键生成 |
+| Java 完整 verify 与 jar 构建 | 58 项通过：27 项 MySQL 契约、27 项 H2 契约、3 项调度器测试、1 项 Docker 检查；0 失败、0 跳过 |
 | Compose 整站构建与启动 | Next.js、Java、MySQL 8.4 启动并完成健康检查 |
-| Chromium 真实浏览器流程 | 2 项通过，覆盖上传、多任务、查询异常恢复、结果预览、处理中刷新、身份隔离及终态停止轮询 |
+| Chromium 真实浏览器流程 | 4 项通过，覆盖原有流程、丢失受理响应后的刷新重放，以及暂时故障自动重试 |
 
-测试覆盖和历史验证记录见 [联调验收记录](docs/integration-validation.md)，需求逐项对应见 [交付核对表](docs/requirements-checklist.md)。本次文档整理未重新运行应用测试，也未进行远端或 GitHub Actions 实时核验；上述结果来自该实现版本的既有容器验证，不能等同于云端 CI 通过。
+测试覆盖和历史验证记录见 [联调验收记录](docs/integration-validation.md)，需求逐项对应见 [交付核对表](docs/requirements-checklist.md)。本次文档整理未重新运行应用测试，也未进行远端或 GitHub Actions 实时核验；上述结果来自当前扩展源码的既有容器验证，不能等同于云端 CI 通过。
+
+## 幂等、续跑与自动重试
+
+方案选择和协议见 [任务可靠性设计](docs/task-reliability.md)：使用 MySQL 账户作用域唯一键原子受理，三阶段检查点恢复、持久化指数退避及租约令牌保护。默认总计 3 次执行，退避基础为 1 秒；不重试明确的素材错误和指定阶段失败。重启或暂时数据库故障后，只接管过期租约，不重做已成功阶段。
+
+网页展开演示控制，可设置“暂时故障位置”和次数；次数 1 可在默认预算内恢复成功，次数 5 会耗尽。响应丢失后点击“恢复上次提交”会复用原键，标签页刷新也能恢复；成功受理后的新一次主动提交使用新键。关闭标签页或清除存储后应先查历史。
+
+除浏览器场景外，还实际对隔离后端发送 SIGKILL 后重启，验证检查点时间不变、第二次从模拟生成继续、原幂等键返回同一任务且最终 PNG 可读取。
+
+`TASK_MAX_ATTEMPTS`、`TASK_RETRY_BASE_DELAY_MS`、`TASK_RETRY_MAX_DELAY_MS`、`TASK_LEASE_MS`、`TASK_HEARTBEAT_INTERVAL_MS` 已接入 `.env.example` 与 Compose。
 
 ## 多任务并发与事务一致性
 
-2026-11-02 已通过完整 Java 构建和 39 项测试（含真实 MySQL，0 跳过），以及前端 lint、类型、构建和 8 项测试。改造为有界工作池：调度线程只派发执行机会，工作线程取得空闲名额后才从数据库认领任务；内存不保存待执行业务队列。每个任务内部的三个阶段仍顺序执行，不同任务可以并行。详见 [事务与一致性设计](docs/async-consistency.md)。
+当前扩展已通过上述 58 项 Java、13 项前端和 4 项浏览器测试。改造为有界工作池：调度线程只派发执行机会，工作线程取得空闲名额后才从数据库认领任务；内存不保存待执行业务队列。每个任务内部的三个阶段仍顺序执行，不同任务可以并行。详见 [事务与一致性设计](docs/async-consistency.md)。
 
 受理、认领、每次阶段迁移和失败归档分别使用短事务。认领使用 `FOR UPDATE SKIP LOCKED`；状态迁移先锁定任务行，再修改步骤，并通过 `version` 条件更新防止覆盖。耗时模拟和图片准备在事务外执行。新本地生成结果的二进制内容写入 V6 新增的 `task_result` 表，与最终步骤和 `SUCCEEDED` 状态原子提交；旧文件结果继续兼容读取。
 
@@ -152,16 +163,16 @@ ACID 保证作用于 InnoDB 中的业务记录及新本地生成结果。上传�
 ## 限制与未完成项
 
 - 当前为单后端实例。注册账户使用邮箱、用户名和密码；演示用户 A/B 仍是共享的公开身份。没有配额、真实 AI、第三方登录或素材管理后台。
-- 服务重启后会话失效，重新登录或选择相同演示身份可读持久化历史。遗留 `RUNNING` 任务归档为 `FAILED / RESTART_INTERRUPTED`，`QUEUED` 任务继续调度；不自动续跑或重试。删除账户会删除该账户的个人记录；未提供单独的素材删除及孤立文件自动清理。
-- 未实现提交幂等；如果提交响应丢失，应先查历史再决定重提。数据库故障可能留下 `RUNNING`，恢复数据库后需重启归档。
-- 尚未提供任务取消、失败重做、单条历史/素材删除、专用下载按钮、邮箱验证或忘记密码流程。这些属于原题之外的扩展，原题只要求结果可预览。
+- 服务重启后会话失效，重新登录或选择相同演示身份可读持久化历史。有效租约继续保留，过期 `RUNNING` 按阶段检查点及尝试预算恢复，`QUEUED` 按到期时间继续调度；预算耗尽才最终失败。删除账户会删除该账户的个人记录；未提供单独的素材删除及孤立文件自动清理。
+- 幂等需要客户端复用 Idempotency-Key；不带键的旧调用不受保护。自动重试有总预算，不保证无限恢复或外部副作用 exactly-once；数据库恢复后会继续扫描过期租约。
+- 尚未提供任务取消、最终失败任务的手动原地重做、单条历史/素材删除、专用下载按钮、邮箱验证或忘记密码流程。这些属于原题之外的扩展，原题只要求结果可预览。
 - 前端开发依赖的兼容性和审计边界见 [前端说明](frontend/README.md#windows-文件占用)。
 
 ## 部署与回滚
 
 升级前备份 MySQL 数据及 `backend_files` 文件卷，并记录已验证的源码 commit 或镜像版本。更新源码和配置后，在根目录执行 `docker compose up -d --build --wait`，随后检查网站、Java 健康接口以及已有历史和结果。
 
-回滚时切换到先前验证过的源码或镜像版本并重新启动服务，确认数据库迁移及结果格式向后兼容。V6 以前的程序不能读取新 task_result 内容，已有新结果时不得直接降级；应保留兼容读取能力，或从匹配版本的备份恢复数据库与文件。停止服务使用 `docker compose down`，不要通过删除数据卷回滚。
+回滚时切换到先前验证过的源码或镜像版本并重新启动服务，确认数据库迁移及结果格式向后兼容。V6 以前的程序不能读取新 task_result 内容，V7 以前的程序不能解释带阶段检查点的退避队列与租约；已有这些数据时不得直接降级；应保留兼容读取能力，或从匹配版本的备份恢复数据库与文件。停止服务使用 `docker compose down`，不要通过删除数据卷回滚。
 
 ## AI 工作流、来源与投入
 
@@ -175,7 +186,7 @@ ACID 保证作用于 InnoDB 中的业务记录及新本地生成结果。上传�
 | --- | --- | --- |
 | 2026-10-31 | 初始化仓库、整理需求和架构方向 | f17922f |
 | 2026-11-01 | 前后端业务闭环、容器与联调、自建模板及状态恢复 | 6b7465d、b13f3a6 |
-| 2026-11-02 | 密码账户、多任务并发、事务一致性、迁移、回归测试与文档整理 | 3d9e932、730d70d 及后续文档变更 |
+| 2026-11-02 | 密码账户、多任务并发、事务一致性、幂等/续跑/自动重试扩展、迁移、回归测试与文档整理 | 3d9e932、730d70d 及后续文档变更 |
 
 以上是工作日期与内容记录，不是有效工时统计。开发者人工投入和 AI 执行时长未独立计时，尚无可核对的小时数；如接收方要求工时，应由开发者按实际记录补充，不将日历跨度折算为工时。
 
@@ -191,13 +202,13 @@ docs/           规划与联调说明
 任务要求.md     R-01～R-14 原始要求
 ```
 
-当前实现验收提交为 `730d70d3ff55b1c2601a8b51162b3e00c1c69371`，主分支 `main`。该版本包含密码账户、多任务并发、V6 结果事务存储和稳定游标恢复，可用 `git show --stat 730d70d` 查看范围。本文档后续修订不改变该业务实现基线。
+此前并发事务基线的验收提交为 `730d70d3ff55b1c2601a8b51162b3e00c1c69371`，主分支 `main`。该版本包含密码账户、多任务并发、V6 结果事务存储和稳定游标恢复，可用 `git show --stat 730d70d` 查看范围。本次提交在此基础上完成 V7 可靠性扩展；可用 `git log -1 --format=%H -- backend/src/main/resources/db/migration/V7__idempotency_retry_and_leases.sql` 定位该扩展的实现提交。
 
-当前实现已在本地提交；远程同步和托管 CI 需分别核验。本次仅检查本地 Git 状态，未执行推送、远端查询或云端流水线查询，不以本地跟踪分支状态证明远端已经同步。交付时请一并记录最终文档提交号。
+本轮可靠性扩展随本次提交本地保存；远程同步和托管 CI 需分别核验。本次仅检查本地 Git 状态，未执行推送、远端查询或云端流水线查询，不以本地跟踪分支状态证明远端已经同步。交付时请一并记录最终文档提交号。
 
 文档入口：
 
-- [当前架构](docs/architecture.md)、[并发与 ACID 边界](docs/async-consistency.md)。
+- [当前架构](docs/architecture.md)、[并发与 ACID 边界](docs/async-consistency.md)、[幂等/续跑/重试方案](docs/task-reliability.md)。
 - [Java API、配置和模拟演示](backend/README.md)、[前端操作和测试](frontend/README.md)。
 - [验收记录](docs/integration-validation.md)、[R-01～R-14 交付核对表](docs/requirements-checklist.md)。
 - [历史实现方案](docs/implementation-plan.md)、[历史参数候选字典](docs/parameter-catalog.md)：保留早期设计讨论，不作为当前接口或完成状态依据。

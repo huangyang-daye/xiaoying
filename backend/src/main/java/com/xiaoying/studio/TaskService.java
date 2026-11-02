@@ -14,11 +14,12 @@ import static com.xiaoying.studio.Models.STAGES;
 public class TaskService {
     private static final Logger log = LoggerFactory.getLogger(TaskService.class);
     private final StudioMapper db; private final CatalogService catalog; private final AssetService assets;
+    private final TaskExecutionPolicy policy;
     private final boolean simulationEnabled; private final int checkDelay,generationDelay,assemblyDelay;
     public TaskService(StudioMapper db,CatalogService catalog,AssetService assets,
         @Value("${app.simulation-enabled}") boolean simulationEnabled,@Value("${app.check-delay-ms}") int checkDelay,
-        @Value("${app.generation-delay-ms}") int generationDelay,@Value("${app.assembly-delay-ms}") int assemblyDelay) {
-        this.db=db; this.catalog=catalog; this.assets=assets; this.simulationEnabled=simulationEnabled;
+        @Value("${app.generation-delay-ms}") int generationDelay,@Value("${app.assembly-delay-ms}") int assemblyDelay,TaskExecutionPolicy policy) {
+        this.db=db; this.catalog=catalog; this.assets=assets; this.policy=policy; this.simulationEnabled=simulationEnabled;
         this.checkDelay=delay(checkDelay,0); this.generationDelay=delay(generationDelay,0); this.assemblyDelay=delay(assemblyDelay,0);
     }
     private static int delay(Integer value,int fallback) {
@@ -27,13 +28,33 @@ public class TaskService {
         return result;
     }
     @Transactional
-    public Task create(String owner,CreateTask request) {
-        log.info("开始受理制作任务，用户 {}，模板 {}", owner, request.templateId());
-        try { return accept(owner, request); }
-        catch(RuntimeException e) { log.info("制作任务受理结束，未创建任务：{}", e.getMessage()); throw e; }
+    public Task create(String owner,CreateTask request) { return accept(owner,request,null); }
+    @Transactional
+    public Task createIdempotent(String owner,CreateTask request,String key) {
+        if(key!=null && !key.matches("[a-z0-9][a-z0-9._:-]{0,127}")) throw ApiException.invalid("Idempotency-Key 须为 1～128 位小写字母、数字或 . _ : -");
+        return accept(owner,request,key);
     }
-    private Task accept(String owner,CreateTask request) {
+    private static String fingerprint(CreateTask request) {
+        Simulation raw=request.simulation();
+        Simulation normalized=new Simulation(raw==null || raw.failAtStage()==null?Failure.NONE:raw.failAtStage(),
+            raw==null?null:raw.materialCheckDelayMs(),raw==null?null:raw.mockGenerationDelayMs(),raw==null?null:raw.resultAssemblyDelayMs(),
+            raw==null || raw.transientFailAtStage()==null?Failure.NONE:raw.transientFailAtStage(),
+            raw==null || raw.transientFailureCount()==null?0:raw.transientFailureCount());
+        try {
+            byte[] payload=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsBytes(new CreateTask(request.templateId(),request.assetIds(),normalized));
+            return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(payload));
+        } catch(java.io.IOException | java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+    private Task accept(String owner,CreateTask request,String key) {
         if(db.lockAccount(owner)==null) throw new ApiException(401,"UNAUTHENTICATED","账户已失效");
+        String hash=fingerprint(request);
+        if(key!=null) {
+            Task previous=db.taskByKey(owner,key);
+            if(previous!=null) {
+                if(!hash.equals(previous.requestHash)) throw new ApiException(409,"IDEMPOTENCY_CONFLICT","该幂等键已用于不同的制作参数");
+                previous.replayed=true; return previous;
+            }
+        }
         Template template=catalog.require(request.templateId(),owner);
         var ids=request.assetIds();
         if(ids.size()!=template.requiredImageCount || new HashSet<>(ids).size()!=ids.size()) throw new ApiException(400,"INVALID_ASSET_COUNT","图片数量须符合模板要求且不可重复");
@@ -50,7 +71,14 @@ public class TaskService {
         t.checkDelayMs=delay(s==null?null:s.materialCheckDelayMs(),checkDelay);
         t.generationDelayMs=delay(s==null?null:s.mockGenerationDelayMs(),generationDelay);
         t.assemblyDelayMs=delay(s==null?null:s.resultAssemblyDelayMs(),assemblyDelay);
-        t.createdAt=Instant.now(); t.updatedAt=t.createdAt; db.insertTask(t);
+        t.createdAt=Instant.now(); t.updatedAt=t.createdAt; t.nextAttemptAt=t.createdAt;
+        t.idempotencyKey=key; t.requestHash=hash; t.maxAttempts=policy.maxAttempts;
+        t.retryBaseDelayMs=policy.baseDelayMs; t.retryMaxDelayMs=policy.maxDelayMs;
+        t.transientFailAtStage=s==null || s.transientFailAtStage()==null?Failure.NONE:s.transientFailAtStage();
+        t.transientFailureCount=s==null || s.transientFailureCount()==null?0:s.transientFailureCount();
+        if(t.transientFailureCount<0 || t.transientFailureCount>5) throw ApiException.invalid("暂时失败次数须为 0～5");
+        if(t.transientFailureCount>0 && t.transientFailAtStage==Failure.NONE) throw ApiException.invalid("请指定暂时失败的阶段");
+        db.insertTask(t);
         for(int i=0;i<ids.size();i++) db.linkAsset(t.id,ids.get(i),i);
         for(int i=0;i<STAGES.size();i++) db.insertStep(t.id,STAGES.get(i),i+1);
         log.info("制作任务 {} 受理完成，状态 QUEUED，阶段 NOT_STARTED", t.id);
@@ -95,6 +123,6 @@ public class TaskService {
             ?new ResultView(t.id,linked,imageType(linked),t.resultSize==null?0:t.resultSize)
             :new ResultView(t.id,"/files/results/"+t.id,"image/png",t.resultSize);
         return new TaskView(t.id,t.templateId,t.templateTitle,t.status,t.currentStage,t.failureStage,t.errorCode,t.errorMessage,result,
-            t.version,t.createdAt,t.updatedAt,t.startedAt,t.finishedAt,db.steps(t.id));
+            t.version,t.createdAt,t.updatedAt,t.startedAt,t.finishedAt,db.steps(t.id),t.attemptCount,t.maxAttempts,t.nextAttemptAt,t.lastErrorCode,t.lastErrorMessage,db.attempts(t.id));
     }
 }

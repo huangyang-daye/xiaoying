@@ -30,15 +30,15 @@ public class TaskScheduler implements AutoCloseable {
     }
     @EventListener(ApplicationReadyEvent.class)
     public void recover() {
-        var interrupted=db.interrupted();
-        log.info("开始重启归档，待处理 {} 个执行中任务",interrupted.size());
-        for(var task:interrupted) lifecycle.fail(task.id,"RESTART_INTERRUPTED","服务重启，原执行任务已中断");
         ready=true;
+        try { recoverExpired(); }
+        catch(Exception e) { log.warn("恢复扫描暂不可用，将在后续调度重试",e); }
         log.info("重启归档结束，调度已就绪，并发上限 {}",concurrency);
     }
     @Scheduled(fixedDelayString="${app.worker.interval-ms}")
     public void tick() {
         if(!ready) return;
+        recoverExpired();
         for(int i=0;i<concurrency && capacity.tryAcquire();i++) {
             try {
                 workers.execute(()->{
@@ -49,6 +49,11 @@ public class TaskScheduler implements AutoCloseable {
             } catch(RejectedExecutionException e) { capacity.release(); break; }
         }
     }
+    private void recoverExpired() {
+        for(String id:db.expiredTasks(java.time.Instant.now())) lifecycle.recoverExpired(id);
+    }
+    @Scheduled(fixedDelayString="${app.worker.heartbeat-interval-ms:1000}")
+    public void heartbeat() { if(ready) processor.heartbeat(); }
     @PreDestroy
     public void close() {
         ready=false; workers.shutdown();

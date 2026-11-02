@@ -11,7 +11,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(properties={"spring.datasource.url=jdbc:h2:mem:scheduling;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
     "spring.datasource.username=sa","spring.datasource.password=","app.storage-root=target/test-storage-scheduling",
-    "app.worker.enabled=true","app.worker.concurrency=2","app.worker.interval-ms=50"})
+    "app.worker.lease-ms=3000","app.worker.heartbeat-interval-ms=500",
+    "app.worker.retry-base-delay-ms=100","app.worker.retry-max-delay-ms=500","app.worker.enabled=true","app.worker.concurrency=2","app.worker.interval-ms=50"})
 class BackendSchedulingTest {
     @Autowired AssetService assets;
     @Autowired TaskService tasks;
@@ -44,6 +45,16 @@ class BackendSchedulingTest {
         }
         assertTrue(parallel,"two tasks must be running together"); assertTrue(queued);
         for(int i=0;i<ids.size();i++) assertEquals(i==4?Status.FAILED:Status.SUCCEEDED,db.task(ids.get(i)).status);
+    }
+
+    @Test void heartbeatProtectsLongStageAndSchedulerAutomaticallyRetries() throws Exception {
+        var asset=assets.upload("demo-a","demo-pet",new MockMultipartFile("file","sample.png","image/png",Files.readAllBytes(storage.path("samples/pet.png"))));
+        Task longTask=tasks.create("demo-a",new CreateTask("demo-pet",List.of(asset.assetId()),new Simulation(Failure.NONE,0,4000,0)));
+        Task retry=tasks.create("demo-a",new CreateTask("demo-pet",List.of(asset.assetId()),new Simulation(Failure.NONE,0,0,0,Failure.MOCK_GENERATION,1)));
+        long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(12);
+        while(System.nanoTime()<deadline && (db.task(longTask.id).status!=Status.SUCCEEDED || db.task(retry.id).status!=Status.SUCCEEDED)) Thread.sleep(20);
+        assertEquals(Status.SUCCEEDED,db.task(longTask.id).status); assertEquals(1,db.task(longTask.id).attemptCount);
+        assertEquals(Status.SUCCEEDED,db.task(retry.id).status); assertEquals(2,db.task(retry.id).attemptCount);
     }
 
 }

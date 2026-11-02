@@ -1,8 +1,9 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- Protected images use the browser session cookie. */
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Asset, type Template } from "@/lib/api";
+import { PendingSubmissionStore, type SubmissionIntent } from "@/lib/pending-submission";
 import { failedUpload, materialRequirement, rejectedSelection, uploadingSelection, type Slot } from "@/lib/upload-slot";
 import { useRemote } from "./use-remote";
 import { RequireSession, useSession, useTasks } from "./provider";
@@ -45,29 +46,41 @@ function AcceptedTask({ id }: { id: string }) {
   return <div className="notice" data-task-id={id} role="status"><p>任务已受理，正在读取状态。</p><Link href={`/tasks/${id}`}>查看任务 {id}</Link></div>;
 }
 function CreationForm({ template }: { template: Template }) {
+  const { session } = useSession();
+  const store = useMemo(() => new PendingSubmissionStore(`studio:pending:${session.user!.id}:${template.id}`), [session.user, template.id]);
+  const [pending, setPending] = useState<SubmissionIntent | null>(null);
   const [slots, setSlots] = useState<Slot[]>(() => Array.from({ length: template.requiredImageCount }, () => ({ uploading: false })));
   const [submitting, setSubmitting] = useState(false); const submitLock = useRef(false);
   const [error, setError] = useState<string | null>(null); const [accepted, setAccepted] = useState<string[]>([]);
   const [simulation, setSimulation] = useState(false); const [failAtStage, setFailAtStage] = useState("NONE");
+  const [transientStage, setTransientStage] = useState("NONE"); const [transientCount, setTransientCount] = useState(1);
   const [delays, setDelays] = useState([1000, 4000, 1000]); const { tracker } = useTasks();
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { let current = true; const saved = store.get(); queueMicrotask(() => { if (current) setPending(saved); }); return () => { current = false; }; }, [store]);
   const uploading = slots.some(slot => slot.uploading);
   const ready = slots.every(slot => !!slot.asset && !slot.uploading);
   const phase = uploading ? "素材上传中" : submitting ? "提交请求中" : accepted.length > 0 ? "任务已受理，可以继续提交" : "";
-  async function submit(event: React.FormEvent) {
-    event.preventDefault(); if (!ready || submitLock.current) return;
-    submitLock.current = true; setSubmitting(true); setError(null);
+  async function send(intent: SubmissionIntent) {
+    if (submitLock.current) return;
+    submitLock.current = true; setSubmitting(true); setError(null); setPending(intent);
     try {
-      const data = await api<{ taskId: string }>("/api/tasks", { method: "POST", body: JSON.stringify({ templateId: template.id, assetIds: slots.map(slot => slot.asset!.assetId), ...(simulation ? { simulation: { failAtStage, materialCheckDelayMs: delays[0], mockGenerationDelayMs: delays[1], resultAssemblyDelayMs: delays[2] } } : {}) }) });
-      void tracker.query(data.taskId);
-      if (mounted.current) setAccepted(ids => [data.taskId, ...ids]);
-    } catch (cause) { if (mounted.current) { setError(`${(cause as Error).message} 如响应丢失，任务可能已受理，请先查看我的作品再决定是否重提。`); void tracker.start(); } }
+      const data = await api<{ taskId: string }>("/api/tasks", { method: "POST", body: intent.body, headers: { "Idempotency-Key": intent.key } });
+      store.clear(intent.key); void tracker.query(data.taskId);
+      if (mounted.current) { setPending(null); setAccepted(ids => ids.includes(data.taskId) ? ids : [data.taskId, ...ids]); }
+    } catch (cause) { if (mounted.current) { setError(`${(cause as Error).message} 可恢复上次提交，系统会返回同一任务。`); void tracker.start(); } }
     finally { submitLock.current = false; if (mounted.current) setSubmitting(false); }
   }
+  async function submit(event: React.FormEvent) {
+    event.preventDefault(); if (!ready || submitLock.current) return;
+    const body = JSON.stringify({ templateId: template.id, assetIds: slots.map(slot => slot.asset!.assetId), ...(simulation ? { simulation: { failAtStage, materialCheckDelayMs: delays[0], mockGenerationDelayMs: delays[1], resultAssemblyDelayMs: delays[2], transientFailAtStage: transientStage, transientFailureCount: transientStage === "NONE" ? 0 : transientCount } } : {}) });
+    try { await send(store.prepare(body)); } catch (cause) { setError((cause as Error).message); }
+  }
+  const stageOptions = <><option value="NONE">不触发</option><option value="MATERIAL_CHECK">素材检查</option><option value="MOCK_GENERATION">模拟生成</option><option value="RESULT_ASSEMBLY">结果整理</option></>;
   return <><form onSubmit={event => void submit(event)} className="creation-panel"><h2>上传你的图片</h2><p className="muted">{materialRequirement(template)}</p>
+    {pending && !submitting && <div className="notice"><p>有一笔尚未确认的提交。即使刷新页面，也可以恢复并获取原任务。</p><button className="button" type="button" onClick={() => void send(pending)}>恢复上次提交</button> <Link href="/history">先核对历史</Link><p><button className="text-button" type="button" onClick={() => { store.clear(); setPending(null); setError(null); }}>已核对历史，清除恢复记录</button></p><small>清除记录不会取消已受理的任务。浏览器存储不可用时，仅当前页面保留恢复信息。</small></div>}
     <div className="upload-grid">{slots.map((_, index) => <UploadSlot key={index} index={index} template={template} disabled={submitting} onChange={(i, slot) => setSlots(previous => previous.map((item, position) => position === i ? slot : item))} />)}</div>
-    <details className="simulation"><summary>演示控制（可选）</summary><label><input type="checkbox" checked={simulation} disabled={submitting} onChange={event => setSimulation(event.target.checked)} />使用自定义模拟参数</label>{simulation && <div className="simulation-fields"><label>失败阶段<select value={failAtStage} disabled={submitting} onChange={event => setFailAtStage(event.target.value)}><option value="NONE">不失败</option><option value="MATERIAL_CHECK">素材检查</option><option value="MOCK_GENERATION">模拟生成</option><option value="RESULT_ASSEMBLY">结果整理</option></select></label>{["素材检查耗时", "模拟生成耗时", "结果整理耗时"].map((label, i) => <label key={label}>{label}（毫秒）<input type="number" min={0} max={30000} step={1} required disabled={submitting} value={Number.isNaN(delays[i]) ? "" : delays[i]} onChange={event => setDelays(values => values.map((value, j) => i === j ? event.target.valueAsNumber : value))} /></label>)}</div>}</details>
+    <details className="simulation"><summary>演示控制（可选）</summary><label><input type="checkbox" checked={simulation} disabled={submitting} onChange={event => setSimulation(event.target.checked)} />使用自定义模拟参数</label>{simulation && <div className="simulation-fields"><label>失败阶段<select value={failAtStage} disabled={submitting} onChange={event => setFailAtStage(event.target.value)}><option value="NONE">不失败</option><option value="MATERIAL_CHECK">素材检查</option><option value="MOCK_GENERATION">模拟生成</option><option value="RESULT_ASSEMBLY">结果整理</option></select></label>{["素材检查耗时", "模拟生成耗时", "结果整理耗时"].map((label, i) => <label key={label}>{label}（毫秒）<input type="number" min={0} max={30000} step={1} required disabled={submitting} value={Number.isNaN(delays[i]) ? "" : delays[i]} onChange={event => setDelays(values => values.map((value, j) => i === j ? event.target.valueAsNumber : value))} /></label>)}<label>暂时故障位置<select value={transientStage} disabled={submitting} onChange={event => setTransientStage(event.target.value)}>{stageOptions}</select></label><label>暂时故障次数<input type="number" min={1} max={5} step={1} required disabled={submitting || transientStage === "NONE"} value={Number.isNaN(transientCount) ? "" : transientCount} onChange={event => setTransientCount(event.target.valueAsNumber)} /></label><p className="muted">暂时故障可自动重试；上方指定的失败阶段直接终止任务。</p></div>}</details>
     {phase && <p role="status">{phase}</p>}
     {error && <p className="feedback" role="alert">{error} <Link href="/history">查看我的作品</Link></p>}
     <button className="button" type="submit" disabled={!ready || submitting}>{submitting ? "正在提交…" : "提交制作任务"}</button><p className="muted">受理后会立刻显示任务，提交按钮恢复可再次提交。每个任务单独跟踪。</p>

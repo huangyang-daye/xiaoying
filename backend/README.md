@@ -44,11 +44,11 @@ mvn spring-boot:run
 
 ## 初始化与素材
 
-`src/main/resources/db/migration/` 包含 V1 表结构、V2 初始化数据、V3/V4 模板链接及归属、V5 账户、V6 事务结果存储迁移。Flyway 在 Java 启动时执行一次，并保存版本，不覆盖已有任务；后续修改结构应新增迁移，不能修改已执行脚本。
+`src/main/resources/db/migration/` 包含 V1 表结构、V2 初始化数据、V3/V4 模板链接及归属、V5 账户、V6 事务结果存储及 V7 幂等、租约和重试迁移。Flyway 在 Java 启动时执行一次，并保存版本，不覆盖已有任务；后续修改结构应新增迁移，不能修改已执行脚本。
 
 初始化包含 3 个分类、6 个模板，素材数量分别覆盖 1、2、3。启动时 `FileStorage` 用 Java2D 创建六张 PNG 示例图，文件写入数据卷的 samples 目录，内容是本项目自行绘制的图形与文字，不依赖外部图片网站或付费服务。示例图既可作为测试上传素材，也可作为模拟结果，输出不代表真实合成用户上传的图片。
 
-主要表：app_user、template_category、template、asset、production_task、task_asset、task_step、task_result。历史直接查询 production_task，结果元信息在任务行中；V6 后新本地生成结果的字节保存在 task_result，与成功状态一并提交。旧结果仍按 result_key 读取文件。
+主要表：app_user、template_category、template、asset、production_task、task_asset、task_step、task_result、task_attempt。历史直接查询 production_task，结果元信息在任务行中；V6 后新本地生成结果的字节保存在 task_result，与成功状态一并提交。旧结果仍按 result_key 读取文件。
 
 ## 会话和个人记录
 
@@ -79,7 +79,7 @@ GET `/api/session` 返回当前身份；POST `/api/session/logout` 注销。所�
 | GET /api/templates | categoryId 可选，page=1，pageSize=20 | items/total/page/pageSize |
 | GET /api/templates/{id} | 模板 ID | 标题、描述、分类、coverUrl、requiredImageCount、acceptedMimeTypes、maxFileSizeBytes |
 | POST /api/assets | multipart：templateId、file | 201，assetId/previewUrl/mimeType/sizeBytes/createdAt |
-| POST /api/tasks | templateId、assetIds 有序数组、simulation 可选 | 202，taskId/status/currentStage/queryUrl，Location 指向查询路径 |
+| POST /api/tasks | templateId、assetIds 有序数组、simulation 可选；Idempotency-Key 可选请求头（网站始终发送） | 202，taskId/status/currentStage/queryUrl，Location 指向查询路径 |
 | GET /api/tasks/{id} | 任务 ID | 完整任务状态、步骤、错误、结果和时间 |
 | GET /api/tasks | status 可重复，page/pageSize | 当前身份历史，按 createdAt DESC/id DESC |
 | GET /api/tasks/active | page/pageSize | 当前身份 QUEUED/RUNNING 任务 |
@@ -142,11 +142,22 @@ pwsh -File backend/scripts/demo.ps1 -DelayMs 5000
 | TASK_DEFAULT_CHECK_DELAY_MS | 1000，整数 0～30000 |
 | TASK_DEFAULT_GENERATION_DELAY_MS | 4000，整数 0～30000 |
 | TASK_DEFAULT_ASSEMBLY_DELAY_MS | 1000，整数 0～30000 |
+| TASK_MAX_ATTEMPTS | 3；总执行次数 1～6，受理时快照 |
+| TASK_RETRY_BASE_DELAY_MS / TASK_RETRY_MAX_DELAY_MS | 1000 / 30000；正数且基础不大于上限，上限至多 300000；受理时快照 |
+| TASK_LEASE_MS / TASK_HEARTBEAT_INTERVAL_MS | 120000 / 1000；租约 3000～3600000，心跳至少 100 且小于租约一半 |
 | TASK_WORKER_CONCURRENCY | 4；每实例并发任务数，1～32；Compose 可从 .env 配置 |
 | TASK_WORKER_ENABLED | true；测试关闭自动调度以检查每个边界 |
 | TASK_DISPATCH_INTERVAL_MS | 500，工作线程空闲时的扫描间隔，须为正数 |
 
 与规划草案的具体差异：实现采用服务端会话而非自制签名 Cookie，无需 SESSION_SIGNING_SECRET；演示用户沿用固定 ID，注册用户使用 32 位随机 ID；结果元信息内嵌任务表；模板标题和样本引用在任务创建时固定，素材数量可从关联记录恢复。实现契约以本文和代码为准。
+
+## 幂等、检查点与重试
+
+本次提交新增 V7：账户作用域幂等键、请求指纹、执行租约、尝试预算、下次执行时间及 task_attempt 历史。同键同参数 202 返回原任务并设置 Idempotency-Replayed: true，不同参数返回 409 / IDEMPOTENCY_CONFLICT；省略键的旧调用仍按非幂等受理。键保留至任务被删除。
+
+默认最多 3 次执行，包含首次、自动重试和中断恢复，采用 1 秒基础、30 秒封顶的指数退避。暂时性数据库/IO 错误及模拟暂时故障可重试；素材缺失、明确的 failAtStage 和普通程序错误不自动重试。成功阶段保持检查点，失败阶段重做；只恢复过期租约，旧令牌不能提交。查询返回 attemptCount、maxAttempts、nextAttemptAt、lastErrorCode/Message、attempts 及每步骤 attemptCount。
+
+完整方案比较、指纹规则、恢复语义、演示和迁移见 [任务可靠性设计](../docs/task-reliability.md)。脚本可用 -ReplayAcceptance 验证同一任务重放；-TransientFailAtStage MOCK_GENERATION -TransientFailureCount 1 -DelayMs 100 演示自动重试成功。
 
 ## 事务与结果一致性
 
@@ -160,16 +171,18 @@ V6 新增 task_result，使用 task_id 主键及级联外键，保存新本地�
 
 ## 测试、边界和后续工作
 
+2026-11-02 当前可靠性扩展：完整 verify 和 jar 构建共 58 项通过（27 MySQL、27 H2、3 调度器、1 Docker 检查），0 失败/跳过；前端 13 项测试及 4 项 Chromium 联调通过。另实际 SIGKILL 并重启隔离后端，验证原任务从已提交检查点恢复、旧尝试租约过期、幂等重放返回同一 ID 和最终结果可读。
+
 2026-11-02 并发改造验证：容器内完整 verify 共 39 项通过（含真实 MySQL 8.4），0 失败、0 跳过，jar 构建通过；包括多工作线程唯一认领、有界并行、受理/阶段/删除回滚、成功失败竞争和稳定游标恢复。以下 2026-11-01 记录为改造前历史结果。
 
 2026-11-01 验证结果：`mvn -B -ntp verify -DrequireDocker=true` 共 18 项通过，0 失败、0 跳过；包含真实 MySQL 8.4 容器以及启用真实调度器的回归测试。另在独立 Compose 项目中完成镜像构建、启动与健康检查，通过 HTTP 演示成功及三个阶段失败，确认成功图片可读取；重启后重新登录，同一历史终态与结果文件仍可读取。验收结束后已停止临时容器，数据卷保留。当时 GitHub Actions 尚未推送触发；该条仅为后端阶段的历史验证记录，不代表当前远端状态；后续前端联调结果见前端 README。
 
 H2 与 Testcontainers MySQL 执行相同契约：分类、校验、上传、任务成功、三个阶段失败、中断后跳过、用户隔离、只读查询、终态不回退、刷新后新会话读取、多任务及并发认领。GitHub Actions 在 push/pull_request 执行 Java verify，要求 Docker；前端检查继续由独立 workflow 执行。
 
-本期为单后端实例。重启时把遗留 RUNNING 标记 FAILED/RESTART_INTERRUPTED，QUEUED 继续调度，已结束任务保留；不实现自动续跑、多实例协调、自动重试或提交幂等。若提交响应丢失，先查历史再决定重提。数据库临时不可用导致状态写入失败时可能留下 RUNNING，需要恢复数据库后重启归档，不承诺自动恢复执行。
+本期为单后端实例。重启及周期扫描只恢复过期 RUNNING，从当前阶段续跑并共用尝试预算；有效租约保留。QUEUED 按 next_attempt_at 调度，终态不复活。数据库暂不可用时保留已提交状态，恢复连接后继续扫描。幂等要求复用同一键；最终失败不支持手动原地重试，多实例共享素材/会话及完整集群运营未验收。
 
 未提供单条素材或作品删除；删除账户会删除该账户的记录与对应文件。未被任务引用的素材和异常产生的孤立文件暂不自动回收。已提供注册与密码登录，尚无邮箱验证、忘记密码、配额或完整生产账号运营能力。Flyway 在 MySQL 8.4 上可能提示其声明测试版本较旧，须以实际 MySQL 契约测试结果核验。
 
 部署升级前备份数据库与文件卷，构建新镜像后 `docker compose up -d --build backend`。回滚使用先前验证过的源码/镜像版本，并确认数据库迁移向后兼容；不兼容时从备份恢复，不能通过删卷回滚。停止服务使用 `docker compose down`，默认保留卷。
 
-本步使用 AI 辅助开发：从 R-01～R-14 拆分接口、持久化和状态机，先生成最小工程与迁移，再实现工作线程和失败注入，使用同一契约在 H2/MySQL 检查，最后以容器 HTTP 演示验证自动调度。具体修正包含拒绝小数延迟，以及把步骤结束和下一步开始合并为一个事务。依赖复用 Spring、MyBatis 等开源库，图形为本项目代码生成，没有复用外部业务代码。当前实现验收 commit 为 `730d70d3ff55b1c2601a8b51162b3e00c1c69371`，已在本地提交；本次文档更新未核验远程同步或托管 CI。工作日期范围和未独立计时的投入说明见[根目录 README](../README.md#ai-工作流来源与投入)。
+本步使用 AI 辅助开发：从 R-01～R-14 拆分接口、持久化和状态机，先生成最小工程与迁移，再实现工作线程和失败注入，使用同一契约在 H2/MySQL 检查，最后以容器 HTTP 演示验证自动调度。具体修正包含拒绝小数延迟，以及把步骤结束和下一步开始合并为一个事务。依赖复用 Spring、MyBatis 等开源库，图形为本项目代码生成，没有复用外部业务代码。此前并发事务验收 commit 为 `730d70d3ff55b1c2601a8b51162b3e00c1c69371`；V7 可靠性扩展随本次提交保存；本次文档更新未核验远程同步或托管 CI。工作日期范围和未独立计时的投入说明见[根目录 README](../README.md#ai-工作流来源与投入)。

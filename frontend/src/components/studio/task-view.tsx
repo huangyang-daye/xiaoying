@@ -27,10 +27,12 @@ export function TaskCard({ task, detailed = false }: { task: Task; detailed?: bo
     <div className="task-heading"><Link href={`/tasks/${task.id}`}><h2>{task.templateTitle}</h2></Link><span className={`status-badge status-${task.status}`}>{statusText[task.status]}</span></div>
     <p className="muted"><time dateTime={task.createdAt}>{new Date(task.createdAt).toLocaleString("zh-CN")}</time><br /><small>任务 {task.id}</small></p>
     <p aria-live="polite">{stageText[task.currentStage]}</p>
+    {(task.attemptCount ?? 0) > 0 && <p className="muted">执行尝试 {task.attemptCount} / {task.maxAttempts}{task.status === "QUEUED" && <> · 等待自动恢复/重试{task.nextAttemptAt && <>，预计 {new Date(task.nextAttemptAt).toLocaleTimeString("zh-CN")}</>}</>}{task.lastErrorMessage && <> · 上次执行：{task.lastErrorMessage}</>}</p>}
     {task.status === "FAILED" && <p className="feedback">{task.failureStage && `${stageText[task.failureStage]}：`}{task.errorMessage}</p>}
     {!terminal(task) && !errors[task.id] && <p className="muted">正在自动跟踪，完成后停止查询。</p>}
     {errors[task.id] && <p className="feedback" role="alert">查询暂不可用，保留上次状态：{errors[task.id]} <button className="text-button" onClick={() => void tracker.query(task.id)}>恢复查询</button></p>}
     {detailed && <ol className="step-list">{task.steps.map(step => <li key={step.stage}><span>{stageText[step.stage]}</span><span>{({ PENDING: "待执行", RUNNING: "执行中", SUCCEEDED: "已完成", FAILED: "失败", SKIPPED: "已跳过" } as Record<string, string>)[step.status]}</span></li>)}</ol>}
+    {detailed && task.attempts && task.attempts.length > 0 && <details><summary>执行尝试记录</summary><ol>{task.attempts.map(attempt => <li key={attempt.attemptNo}>第 {attempt.attemptNo} 次 · {stageText[attempt.stage]} · {({ RUNNING: "执行中", SUCCEEDED: "成功", FAILED: "最终失败", RETRY_SCHEDULED: "已安排重试", LEASE_EXPIRED: "中断后恢复" } as Record<string, string>)[attempt.outcome]}{attempt.errorMessage && `：${attempt.errorMessage}`}</li>)}</ol></details>}
     <ResultImage task={task} />
     {!detailed && <Link className="text-button" href={`/tasks/${task.id}`}>查看制作详情 ↗</Link>}
   </article>;

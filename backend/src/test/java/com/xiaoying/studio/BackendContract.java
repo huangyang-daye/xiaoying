@@ -164,7 +164,7 @@ abstract class BackendContract {
         mvc.perform(get("/api/tasks/active").session(a)).andExpect(jsonPath("$.total").value(0));
         a=login("demo-a");
         assertEquals(task,detail(id)); // New session reads the same durable result.
-        lifecycle.fail(id,"TEST","must not change terminal state");
+        lifecycle.fail(id,db.task(id).leaseToken,"TEST","must not change terminal state");
         processor.runNext();
         assertEquals(task,detail(id));
     }
@@ -206,9 +206,13 @@ abstract class BackendContract {
         assertEquals("MATERIAL_UNAVAILABLE",db.task(id).errorCode);
         String interrupted=create(Failure.NONE,0);
         assertEquals(interrupted,lifecycle.claimNext().id);
+        jdbc.update("UPDATE production_task SET lease_expires_at=? WHERE id=?",java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(1)),interrupted);
         try(var dispatcher=new TaskScheduler(processor,lifecycle,db,2)) { dispatcher.recover(); }
-        assertEquals("RESTART_INTERRUPTED",db.task(interrupted).errorCode);
-        assertEquals(StepStatus.SKIPPED,db.steps(interrupted).get(1).status);
+        assertEquals(Status.QUEUED,db.task(interrupted).status);
+        assertEquals("LEASE_EXPIRED",db.task(interrupted).lastErrorCode);
+        assertEquals(StepStatus.PENDING,db.steps(interrupted).get(1).status);
+        jdbc.update("UPDATE production_task SET next_attempt_at=NULL WHERE id=?",interrupted);
+        processor.runNext(); assertEquals(Status.SUCCEEDED,db.task(interrupted).status);
     }
     @Test void concurrentClaimsOnlyHaveOneWinner() throws Exception {
         String id=create(Failure.NONE,0);
@@ -309,32 +313,32 @@ abstract class BackendContract {
     }
     @Test void brokenTransitionRollsBackStepAndResultWrites() throws Exception {
         String id=create(Failure.NONE,0); lifecycle.claimNext();
-        lifecycle.completeStep(id,Stage.MATERIAL_CHECK,null);
-        lifecycle.completeStep(id,Stage.MOCK_GENERATION,null);
+        lifecycle.completeStep(id,db.task(id).leaseToken,Stage.MATERIAL_CHECK,null);
+        lifecycle.completeStep(id,db.task(id).leaseToken,Stage.MOCK_GENERATION,null);
         long version=db.task(id).version;
-        assertThrows(IllegalStateException.class,()->lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,null));
+        assertThrows(IllegalStateException.class,()->lifecycle.completeStep(id,db.task(id).leaseToken,Stage.RESULT_ASSEMBLY,null));
         assertEquals(StepStatus.RUNNING,db.steps(id).get(2).status);
         assertEquals(version,db.task(id).version);
         assertNull(db.resultContent(id));
         // A failing SQL write after updating the step must roll that step back too.
         db.insertResult(id,image());
-        assertThrows(org.springframework.dao.DataAccessException.class,()->lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,new byte[]{1}));
+        assertThrows(org.springframework.dao.DataAccessException.class,()->lifecycle.completeStep(id,db.task(id).leaseToken,Stage.RESULT_ASSEMBLY,new byte[]{1}));
         assertEquals(StepStatus.RUNNING,db.steps(id).get(2).status);
         assertEquals(Status.RUNNING,db.task(id).status);
         assertEquals(version,db.task(id).version);
         jdbc.update("DELETE FROM task_result WHERE task_id=?",id);
-        lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,image());
+        lifecycle.completeStep(id,db.task(id).leaseToken,Stage.RESULT_ASSEMBLY,image());
         assertArrayEquals(image(),db.resultContent(id));
         assertEquals(Status.SUCCEEDED,db.task(id).status);
     }
     @Test void concurrentSuccessAndFailureCannotMixTerminalRecords() throws Exception {
         String id=create(Failure.NONE,0); lifecycle.claimNext();
-        lifecycle.completeStep(id,Stage.MATERIAL_CHECK,null);
-        lifecycle.completeStep(id,Stage.MOCK_GENERATION,null);
+        lifecycle.completeStep(id,db.task(id).leaseToken,Stage.MATERIAL_CHECK,null);
+        lifecycle.completeStep(id,db.task(id).leaseToken,Stage.MOCK_GENERATION,null);
         byte[] content=image(); var barrier=new CyclicBarrier(2); var executor=Executors.newFixedThreadPool(2);
         try {
-            var completed=executor.submit(()->{ barrier.await(); try { lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,content); } catch(IllegalStateException expected) { } return null; });
-            var failed=executor.submit(()->{ barrier.await(); lifecycle.fail(id,"TEST_FAILURE","concurrent failure"); return null; });
+            var completed=executor.submit(()->{ barrier.await(); try { lifecycle.completeStep(id,db.task(id).leaseToken,Stage.RESULT_ASSEMBLY,content); } catch(IllegalStateException expected) { } return null; });
+            var failed=executor.submit(()->{ barrier.await(); lifecycle.fail(id,db.task(id).leaseToken,"TEST_FAILURE","concurrent failure"); return null; });
             completed.get(5,TimeUnit.SECONDS); failed.get(5,TimeUnit.SECONDS);
             Task stored=db.task(id); Step last=db.steps(id).get(2);
             if(stored.status==Status.SUCCEEDED) {
@@ -367,8 +371,8 @@ abstract class BackendContract {
         assertEquals(List.of(newest,middle),first.items().stream().map(TaskView::id).toList());
         assertEquals(middle,first.nextCursor());
         // Force the previously returned tasks to finish before the next request.
-        jdbc.update("UPDATE production_task SET status='RUNNING' WHERE id IN (?,?)",middle,newest);
-        lifecycle.fail(middle,"TEST","finished during pagination"); lifecycle.fail(newest,"TEST","finished during pagination");
+        for(int i=0;i<3;i++) lifecycle.claimNext();
+        lifecycle.fail(middle,db.task(middle).leaseToken,"TEST","finished during pagination"); lifecycle.fail(newest,db.task(newest).leaseToken,"TEST","finished during pagination");
         var next=tasks.active("demo-a",first.nextCursor(),2,2);
         assertEquals(List.of(oldest),next.items().stream().map(TaskView::id).toList());
         assertNull(next.nextCursor());
@@ -384,6 +388,137 @@ abstract class BackendContract {
         }));
         assertNotNull(db.account("demo-a")); assertEquals(Status.SUCCEEDED,db.task(id).status);
         assertArrayEquals(content,db.resultContent(id)); assertTrue(Files.isRegularFile(files.path(asset.storageKey)));
+    }
+
+    void due(String id) { jdbc.update("UPDATE production_task SET next_attempt_at=NULL WHERE id=?",id); }
+    void expire(String id) { jdbc.update("UPDATE production_task SET lease_expires_at=? WHERE id=?",java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(1)),id); }
+    CreateTask transientRequest(String asset,Failure stage,int failures) {
+        return new CreateTask("demo-pet",List.of(asset),new Simulation(Failure.NONE,0,0,0,stage,failures));
+    }
+    @Test void idempotentAcceptanceReplaysAndRejectsChangedPayload() throws Exception {
+        String asset=upload(a); byte[] request=body(asset,Failure.NONE,0);
+        var first=mvc.perform(post("/api/tasks").session(a).header("Idempotency-Key","stable-intent").contentType(MediaType.APPLICATION_JSON).content(request))
+            .andExpect(status().isAccepted()).andExpect(header().string("Idempotency-Replayed","false")).andReturn();
+        String id=json.readTree(first.getResponse().getContentAsByteArray()).get("taskId").asText();
+        processor.runNext();
+        mvc.perform(post("/api/tasks").session(a).header("Idempotency-Key","stable-intent").contentType(MediaType.APPLICATION_JSON).content(request))
+            .andExpect(status().isAccepted()).andExpect(header().string("Idempotency-Replayed","true"))
+            .andExpect(jsonPath("$.taskId").value(id)).andExpect(jsonPath("$.status").value("SUCCEEDED"));
+        mvc.perform(post("/api/tasks").session(a).header("Idempotency-Key","stable-intent").contentType(MediaType.APPLICATION_JSON).content(body(asset,Failure.MOCK_GENERATION,0)))
+            .andExpect(status().isConflict()).andExpect(jsonPath("$.errorCode").value("IDEMPOTENCY_CONFLICT"));
+        mvc.perform(post("/api/tasks").session(a).header("Idempotency-Key","invalid key").contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isBadRequest());
+        assertEquals(1,db.taskCount("demo-a",null)); assertEquals(3,db.steps(id).size());
+        assertEquals(1,db.attempts(id).size());
+        assertFalse(detail(id).get("attempts").get(0).has("leaseToken"));
+        String other=upload(b);
+        Task independent=tasks.createIdempotent("demo-b",transientRequest(other,Failure.NONE,0),"stable-intent");
+        assertNotEquals(id,independent.id);
+    }
+    @Test void concurrentIdempotentRequestsCreateOneTask() throws Exception {
+        var request=transientRequest(upload(a),Failure.NONE,0); var start=new CountDownLatch(1);
+        var executor=Executors.newFixedThreadPool(8);
+        try {
+            List<Future<Task>> calls=new ArrayList<>();
+            for(int i=0;i<8;i++) calls.add(executor.submit(()->{ start.await(); return tasks.createIdempotent("demo-a",request,"concurrent-intent"); }));
+            start.countDown(); var ids=new HashSet<String>(); int fresh=0;
+            for(var result:calls) { Task t=result.get(10,TimeUnit.SECONDS); ids.add(t.id); if(!t.replayed) fresh++; }
+            assertEquals(1,ids.size()); assertEquals(1,fresh); assertEquals(1,db.taskCount("demo-a",null));
+        } finally { executor.shutdownNow(); }
+    }
+    @Test void idempotencyRollsBackWithAcceptanceAndReplaysWithoutRevalidatingFiles() throws Exception {
+        String asset=upload(a); var request=transientRequest(asset,Failure.NONE,0);
+        var tx=new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(status->{
+            tasks.createIdempotent("demo-a",request,"rolled-back-intent"); throw new IllegalStateException("rollback");
+        }));
+        assertNull(db.taskByKey("demo-a","rolled-back-intent"));
+        Task created=tasks.createIdempotent("demo-a",request,"rolled-back-intent");
+        files.delete(db.asset(asset,"demo-a").storageKey);
+        Task replay=tasks.createIdempotent("demo-a",request,"rolled-back-intent");
+        assertEquals(created.id,replay.id); assertTrue(replay.replayed);
+    }
+    @Test void transientRetryKeepsCompletedCheckpointAndHonorsDueTime() throws Exception {
+        Task created=tasks.create("demo-a",transientRequest(upload(a),Failure.MOCK_GENERATION,1));
+        processor.runNext(); Task pending=db.task(created.id);
+        assertEquals(Status.QUEUED,pending.status); assertEquals(Stage.MOCK_GENERATION,pending.currentStage);
+        assertEquals(1,pending.attemptCount); assertEquals("SIMULATED_TRANSIENT_FAILURE",pending.lastErrorCode);
+        assertNull(pending.errorCode); assertEquals(1000,java.time.Duration.between(pending.updatedAt,pending.nextAttemptAt).toMillis());
+        assertNull(lifecycle.claimNext());
+        var checkpoint=db.steps(created.id).get(0); due(created.id); processor.runNext();
+        Task finished=db.task(created.id); assertEquals(Status.SUCCEEDED,finished.status); assertEquals(2,finished.attemptCount);
+        var steps=db.steps(created.id); assertEquals(1,steps.get(0).attemptCount); assertEquals(checkpoint.finishedAt,steps.get(0).finishedAt);
+        assertEquals(2,steps.get(1).attemptCount); assertEquals(1,steps.get(2).attemptCount);
+        assertEquals(List.of("RETRY_SCHEDULED","SUCCEEDED"),db.attempts(created.id).stream().map(x->x.outcome).toList());
+        assertNotNull(db.resultContent(created.id));
+    }
+    @Test void retryBudgetExhaustsWithBoundedBackoffAndStableFailure() throws Exception {
+        Task created=tasks.create("demo-a",transientRequest(upload(a),Failure.RESULT_ASSEMBLY,5));
+        processor.runNext(); Task first=db.task(created.id);
+        assertEquals(1000,java.time.Duration.between(first.updatedAt,first.nextAttemptAt).toMillis());
+        due(created.id); processor.runNext(); Task second=db.task(created.id);
+        assertEquals(2000,java.time.Duration.between(second.updatedAt,second.nextAttemptAt).toMillis());
+        due(created.id); processor.runNext(); Task failed=db.task(created.id);
+        assertEquals(Status.FAILED,failed.status); assertEquals("RETRY_EXHAUSTED",failed.errorCode);
+        assertEquals(Stage.RESULT_ASSEMBLY,failed.failureStage); assertEquals(3,failed.attemptCount);
+        assertEquals(StepStatus.FAILED,db.steps(created.id).get(2).status); assertNull(db.resultContent(created.id));
+        var before=detail(created.id); processor.runNext(); assertEquals(before,detail(created.id));
+        assertEquals(3,db.attempts(created.id).size());
+    }
+    @Test void validLeaseIsNotRecoveredAndExpiredLeaseResumesWithFencing() throws Exception {
+        String id=create(Failure.NONE,0); Task old=lifecycle.claimNext();
+        lifecycle.completeStep(id,old.leaseToken,Stage.MATERIAL_CHECK,null);
+        var checkpoint=db.steps(id).get(0);
+        try(var dispatcher=new TaskScheduler(processor,lifecycle,db,2)) { dispatcher.recover(); }
+        assertEquals(old.leaseToken,db.task(id).leaseToken); assertEquals(Status.RUNNING,db.task(id).status);
+        expire(id); lifecycle.recoverExpired(id); assertEquals(Status.QUEUED,db.task(id).status);
+        assertFalse(lifecycle.renew(id,old.leaseToken));
+        due(id); Task resumed=lifecycle.claimNext(); assertNotEquals(old.leaseToken,resumed.leaseToken);
+        assertEquals(Stage.MOCK_GENERATION,resumed.currentStage);
+        assertThrows(TaskLifecycle.LostLeaseException.class,()->lifecycle.completeStep(id,old.leaseToken,Stage.MOCK_GENERATION,null));
+        lifecycle.recordFailure(id,old.leaseToken,"STALE","must not overwrite",true);
+        assertEquals(resumed.leaseToken,db.task(id).leaseToken);
+        lifecycle.completeStep(id,resumed.leaseToken,Stage.MOCK_GENERATION,null);
+        lifecycle.completeStep(id,resumed.leaseToken,Stage.RESULT_ASSEMBLY,image());
+        assertEquals(Status.SUCCEEDED,db.task(id).status);
+        assertEquals(checkpoint.finishedAt,db.steps(id).get(0).finishedAt);
+        assertEquals(1,db.steps(id).get(0).attemptCount);
+        assertEquals(List.of("LEASE_EXPIRED","SUCCEEDED"),db.attempts(id).stream().map(x->x.outcome).toList());
+    }
+    @Test void concurrentRecoveryAndRepeatedCrashesRespectBudget() throws Exception {
+        String id=create(Failure.NONE,0); lifecycle.claimNext(); expire(id);
+        var executor=Executors.newFixedThreadPool(2);
+        try {
+            var calls=executor.invokeAll(List.<Callable<Void>>of(()->{ lifecycle.recoverExpired(id); return null; },()->{ lifecycle.recoverExpired(id); return null; }));
+            for(var call:calls) call.get(5,TimeUnit.SECONDS);
+        } finally { executor.shutdownNow(); }
+        assertEquals(Status.QUEUED,db.task(id).status); assertEquals(1,db.attempts(id).size());
+        for(int i=0;i<2;i++) { due(id); lifecycle.claimNext(); expire(id); lifecycle.recoverExpired(id); }
+        assertEquals(Status.FAILED,db.task(id).status); assertEquals(3,db.task(id).attemptCount);
+        assertEquals("RETRY_EXHAUSTED",db.task(id).errorCode);
+        assertEquals(StepStatus.SKIPPED,db.steps(id).get(1).status);
+    }
+    @Test void claimAndAuditInsertAreAtomic() throws Exception {
+        String id=create(Failure.NONE,0);
+        jdbc.update("INSERT INTO task_attempt(task_id,attempt_no,lease_token,stage,outcome,started_at) VALUES(?,1,'conflict','MATERIAL_CHECK','FAILED',CURRENT_TIMESTAMP)",id);
+        assertThrows(org.springframework.dao.DataAccessException.class,lifecycle::claimNext);
+        Task t=db.task(id); assertEquals(Status.QUEUED,t.status); assertEquals(0,t.attemptCount); assertEquals(0,t.version);
+        assertEquals(StepStatus.PENDING,db.steps(id).get(0).status);
+        jdbc.update("DELETE FROM task_attempt WHERE task_id=?",id);
+        assertNotNull(lifecycle.claimNext());
+    }
+
+    @Test void persistedRetryDelayIsCappedAcrossAttempts() throws Exception {
+        Task created=tasks.create("demo-a",transientRequest(upload(a),Failure.MOCK_GENERATION,2));
+        jdbc.update("UPDATE production_task SET retry_max_delay_ms=1000 WHERE id=?",created.id);
+        for(int attempt=1;attempt<=2;attempt++) {
+            processor.runNext(); Task waiting=db.task(created.id);
+            assertEquals(Status.QUEUED,waiting.status);
+            assertEquals(1000,java.time.Duration.between(waiting.updatedAt,waiting.nextAttemptAt).toMillis());
+            assertEquals(attempt,waiting.attemptCount); due(created.id);
+        }
+        processor.runNext(); assertEquals(Status.SUCCEEDED,db.task(created.id).status);
+        assertEquals(1,db.steps(created.id).get(0).attemptCount);
+        assertEquals(3,db.steps(created.id).get(1).attemptCount);
     }
 
 }

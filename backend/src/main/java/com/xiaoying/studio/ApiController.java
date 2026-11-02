@@ -71,9 +71,10 @@ public class ApiController {
     public TemplateView updateTemplate(@PathVariable String id,@RequestBody TemplateDraft body,HttpServletRequest request) { return catalog.update(id,body,user(request).id()); }
     @PostMapping(value="/api/assets",consumes=MediaType.MULTIPART_FORM_DATA_VALUE) @ResponseStatus(HttpStatus.CREATED)
     public AssetView upload(@RequestParam String templateId,@RequestPart MultipartFile file,HttpServletRequest request) { return assets.upload(user(request).id(),templateId,file); }
-    @PostMapping("/api/tasks") public ResponseEntity<?> create(@Valid @RequestBody CreateTask body,HttpServletRequest request) {
-        Task t=tasks.create(user(request).id(),body);
-        return ResponseEntity.accepted().header("Location","/api/tasks/"+t.id).body(Map.of("taskId",t.id,"status",t.status,"currentStage",t.currentStage,"queryUrl","/api/tasks/"+t.id));
+    @PostMapping("/api/tasks") public ResponseEntity<?> create(@Valid @RequestBody CreateTask body,HttpServletRequest request,
+        @RequestHeader(value="Idempotency-Key",required=false) String key) {
+        Task t=tasks.createIdempotent(user(request).id(),body,key);
+        return ResponseEntity.accepted().header("Location","/api/tasks/"+t.id).header("Idempotency-Replayed",String.valueOf(t.replayed)).body(Map.of("taskId",t.id,"status",t.status,"currentStage",t.currentStage,"queryUrl","/api/tasks/"+t.id));
     }
     @GetMapping("/api/tasks/{id}") public TaskView task(@PathVariable String id,HttpServletRequest request) { return tasks.detail(id,user(request).id()); }
     @GetMapping("/api/tasks") public Page<TaskView> history(HttpServletRequest request,@RequestParam(required=false) List<Status> status,

@@ -26,7 +26,12 @@ public final class Models {
     public record DeleteAccount(String password) {}
     public record Simulation(Failure failAtStage, @Min(0) @Max(30000) Integer materialCheckDelayMs,
                              @Min(0) @Max(30000) Integer mockGenerationDelayMs,
-                             @Min(0) @Max(30000) Integer resultAssemblyDelayMs) {}
+                             @Min(0) @Max(30000) Integer resultAssemblyDelayMs,
+                             Failure transientFailAtStage, @Min(0) @Max(5) Integer transientFailureCount) {
+        public Simulation(Failure failure,Integer check,Integer generation,Integer assembly) {
+            this(failure,check,generation,assembly,Failure.NONE,0);
+        }
+    }
     public record CreateTask(@NotBlank String templateId, @NotEmpty @Size(max=3) List<@NotBlank String> assetIds,
                              @Valid Simulation simulation) {}
     public record Page<T>(List<T> items, long total, int page, int pageSize, String nextCursor) {
@@ -45,6 +50,11 @@ public final class Models {
         public String id, ownerId, templateId, templateTitle, sampleKey, sampleResultUrl, errorCode, errorMessage, resultKey;
         public Status status; public Stage currentStage, failureStage; public Failure failAtStage;
         public int checkDelayMs, generationDelayMs, assemblyDelayMs;
+        public String idempotencyKey, requestHash, leaseToken, lastErrorCode, lastErrorMessage;
+        public Failure transientFailAtStage;
+        public int transientFailureCount, attemptCount, maxAttempts, retryBaseDelayMs, retryMaxDelayMs;
+        public Instant nextAttemptAt, leaseExpiresAt;
+        public boolean replayed;
         public Long resultSize; public long version;
         public Instant createdAt, updatedAt, startedAt, finishedAt;
     }
@@ -52,6 +62,12 @@ public final class Models {
     public static class Step {
         public String taskId, errorCode, errorMessage; public Stage stage; public int sequenceNo;
         public StepStatus status; public Instant startedAt, finishedAt;
+        public int attemptCount;
+    }
+    public static class Attempt {
+        public String taskId, outcome, errorCode, errorMessage;
+        @com.fasterxml.jackson.annotation.JsonIgnore public String leaseToken;
+        public int attemptNo; public Stage stage; public Instant startedAt, finishedAt;
     }
     public record TemplateDraft(String id, String categoryId, String title, String description, Integer requiredImageCount,
                                 List<String> acceptedMimeTypes, Long maxFileSizeBytes, String coverUrl, String sampleResultUrl) {}
@@ -63,5 +79,6 @@ public final class Models {
     public record TaskView(String id, String templateId, String templateTitle, Status status, Stage currentStage,
                            Stage failureStage, String errorCode, String errorMessage, ResultView result,
                            long version, Instant createdAt, Instant updatedAt, Instant startedAt, Instant finishedAt,
-                           List<Step> steps) {}
+                           List<Step> steps, int attemptCount, int maxAttempts, Instant nextAttemptAt,
+                           String lastErrorCode, String lastErrorMessage, List<Attempt> attempts) {}
 }

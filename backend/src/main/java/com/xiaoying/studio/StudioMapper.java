@@ -22,9 +22,11 @@ public interface StudioMapper {
     @Select("SELECT * FROM asset WHERE id=#{id} AND owner_id=#{owner}") Asset asset(@Param("id") String id,@Param("owner") String owner);
     @Insert("""
         INSERT INTO production_task(id,owner_id,template_id,template_title,sample_key,sample_result_url,status,current_stage,
-        fail_at_stage,check_delay_ms,generation_delay_ms,assembly_delay_ms,version,created_at,updated_at)
+        fail_at_stage,check_delay_ms,generation_delay_ms,assembly_delay_ms,version,created_at,updated_at,
+        idempotency_key,request_hash,max_attempts,retry_base_delay_ms,retry_max_delay_ms,next_attempt_at,transient_fail_at_stage,transient_failure_count)
         VALUES(#{id},#{ownerId},#{templateId},#{templateTitle},#{sampleKey},#{sampleResultUrl},#{status},#{currentStage},
-        #{failAtStage},#{checkDelayMs},#{generationDelayMs},#{assemblyDelayMs},#{version},#{createdAt},#{updatedAt})
+        #{failAtStage},#{checkDelayMs},#{generationDelayMs},#{assemblyDelayMs},#{version},#{createdAt},#{updatedAt},
+        #{idempotencyKey},#{requestHash},#{maxAttempts},#{retryBaseDelayMs},#{retryMaxDelayMs},#{nextAttemptAt},#{transientFailAtStage},#{transientFailureCount})
         """) void insertTask(Task t);
     @Insert("INSERT INTO task_asset VALUES(#{task},#{asset},#{slot})") void linkAsset(@Param("task") String task,@Param("asset") String asset,@Param("slot") int slot);
     @Insert("INSERT INTO task_step(task_id,stage,sequence_no,status) VALUES(#{task},#{stage},#{seq},'PENDING')")
@@ -40,18 +42,40 @@ public interface StudioMapper {
     default byte[] resultContent(String id) { TaskResult row=result(id); return row==null?null:row.content; }
     @Select("SELECT * FROM task_step WHERE task_id=#{id} ORDER BY sequence_no") List<Step> steps(String id);
     @Select("SELECT a.* FROM asset a JOIN task_asset ta ON a.id=ta.asset_id WHERE ta.task_id=#{id} ORDER BY ta.slot_index") List<Asset> taskAssets(String id);
-    @Select("SELECT id FROM production_task WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED") String nextQueued();
-    @Update("UPDATE production_task SET status='RUNNING',current_stage='MATERIAL_CHECK',started_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6),version=version+1 WHERE id=#{id} AND status='QUEUED'") int claim(String id);
+    @Select("SELECT id FROM production_task WHERE status='QUEUED' AND (next_attempt_at IS NULL OR next_attempt_at <= #{now}) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")
+    String nextQueued(java.time.Instant now);
+    @Update("""
+        UPDATE production_task SET status='RUNNING',current_stage=#{currentStage},started_at=COALESCE(started_at,#{startedAt}),
+        updated_at=#{updatedAt},attempt_count=#{attemptCount},lease_token=#{leaseToken},lease_expires_at=#{leaseExpiresAt},next_attempt_at=NULL,
+        version=version+1 WHERE id=#{id} AND status='QUEUED' AND version=#{version}
+        """) int claim(Task t);
     @Update("""
         UPDATE production_task SET status=#{status},current_stage=#{currentStage},failure_stage=#{failureStage},
         error_code=#{errorCode},error_message=#{errorMessage},result_key=#{resultKey},result_size=#{resultSize},
-        finished_at=#{finishedAt},updated_at=#{updatedAt},version=version+1 WHERE id=#{id} AND status='RUNNING' AND version=#{version}
+        finished_at=#{finishedAt},updated_at=#{updatedAt},lease_token=#{leaseToken},lease_expires_at=#{leaseExpiresAt},
+        next_attempt_at=#{nextAttemptAt},last_error_code=#{lastErrorCode},last_error_message=#{lastErrorMessage},version=version+1 WHERE id=#{id} AND status='RUNNING' AND version=#{version}
         """) int updateTask(Task t);
     @Update("""
         UPDATE task_step SET status=#{status},started_at=#{startedAt},finished_at=#{finishedAt},
-        error_code=#{errorCode},error_message=#{errorMessage} WHERE task_id=#{taskId} AND stage=#{stage}
+        error_code=#{errorCode},error_message=#{errorMessage},attempt_count=#{attemptCount} WHERE task_id=#{taskId} AND stage=#{stage}
         """) int updateStep(Step s);
-    @Select("SELECT * FROM production_task WHERE status='RUNNING'") List<Task> interrupted();
+    @Select("SELECT * FROM production_task WHERE owner_id=#{owner} AND idempotency_key=#{key}")
+    Task taskByKey(@Param("owner") String owner,@Param("key") String key);
+    @Select("SELECT id FROM production_task WHERE status='RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at <= #{now}) ORDER BY id LIMIT 100")
+    List<String> expiredTasks(java.time.Instant now);
+    @Update("UPDATE production_task SET lease_expires_at=#{until} WHERE id=#{id} AND status='RUNNING' AND lease_token=#{token} AND lease_expires_at > #{now}")
+    int renewLease(@Param("id") String id,@Param("token") String token,@Param("now") java.time.Instant now,@Param("until") java.time.Instant until);
+    @Insert("INSERT INTO task_attempt(task_id,attempt_no,lease_token,stage,outcome,started_at) VALUES(#{id},#{attemptCount},#{leaseToken},#{currentStage},'RUNNING',#{updatedAt})")
+    int insertAttempt(Task t);
+    @Update("""
+        UPDATE task_attempt SET outcome=#{outcome},stage=#{stage},finished_at=#{now},error_code=#{code},error_message=#{message}
+        WHERE task_id=#{id} AND attempt_no=#{attempt} AND lease_token=#{token} AND outcome='RUNNING'
+        """) int finishAttempt(@Param("id") String id,@Param("attempt") int attempt,@Param("token") String token,
+            @Param("outcome") String outcome,@Param("stage") Stage stage,@Param("now") java.time.Instant now,
+            @Param("code") String code,@Param("message") String message);
+    @Update("UPDATE task_attempt SET stage=#{stage} WHERE task_id=#{id} AND attempt_no=#{attempt} AND lease_token=#{token} AND outcome='RUNNING'")
+    int advanceAttempt(@Param("id") String id,@Param("attempt") int attempt,@Param("token") String token,@Param("stage") Stage stage);
+    @Select("SELECT * FROM task_attempt WHERE task_id=#{id} ORDER BY attempt_no") List<Attempt> attempts(String id);
     @Select("""
         <script>SELECT * FROM production_task WHERE owner_id=#{owner}
         <if test='statuses != null and !statuses.isEmpty()'>AND status IN

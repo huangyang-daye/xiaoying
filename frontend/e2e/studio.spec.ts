@@ -93,3 +93,46 @@ test("two-image template and refresh while running; terminal tasks stop polling"
   await page.waitForTimeout(2000); expect(queries).toBe(0);
   await page.goto("/templates/does-not-exist"); await expect(page.getByRole("heading", { name: "模板不存在" })).toBeVisible();
 });
+
+
+test("lost acceptance response survives refresh and replays the same task", async ({ page }) => {
+  await page.goto("/templates/demo-pet"); await page.getByLabel("演示身份").selectOption("demo-a");
+  const sample = await page.request.get("/files/samples/pet");
+  await page.getByLabel("选择图片 1").setInputFiles({ name: "pet.png", mimeType: "image/png", buffer: await sample.body() });
+  await expect(page.getByRole("button", { name: "提交制作任务", exact: true })).toBeEnabled();
+  let id = "", key = "", first = true;
+  await page.route("**/api/tasks", async route => {
+    if (route.request().method() === "POST" && first) {
+      first = false; key = route.request().headers()["idempotency-key"];
+      const accepted = await route.fetch(); expect(accepted.status()).toBe(202); id = (await accepted.json()).taskId;
+      await route.abort("failed");
+    } else await route.continue();
+  });
+  await page.getByRole("button", { name: "提交制作任务", exact: true }).click();
+  await expect(page.getByRole("button", { name: "恢复上次提交", exact: true })).toBeVisible();
+  await page.reload();
+  const recovery = page.getByRole("button", { name: "恢复上次提交", exact: true }); await expect(recovery).toBeVisible();
+  const replayed = page.waitForResponse(response => response.url().endsWith("/api/tasks") && response.request().method() === "POST");
+  await recovery.click(); const response = await replayed;
+  expect(response.status()).toBe(202); expect(response.headers()["idempotency-replayed"]).toBe("true");
+  expect(response.request().headers()["idempotency-key"]).toBe(key); expect((await response.json()).taskId).toBe(id);
+  await expect(page.locator(`[data-task-id="${id}"]`)).toBeVisible(); await expect(recovery).toHaveCount(0);
+});
+
+test("temporary stage failure retries from its checkpoint and becomes successful", async ({ page }) => {
+  await page.goto("/templates/demo-pet"); await page.getByLabel("演示身份").selectOption("demo-a");
+  const sample = await page.request.get("/files/samples/pet");
+  await page.getByLabel("选择图片 1").setInputFiles({ name: "pet.png", mimeType: "image/png", buffer: await sample.body() });
+  const submit = page.getByRole("button", { name: "提交制作任务", exact: true }); await expect(submit).toBeEnabled();
+  await page.getByText("演示控制（可选）", { exact: true }).click(); await page.getByLabel("使用自定义模拟参数").check();
+  for (const label of ["素材检查耗时（毫秒）", "模拟生成耗时（毫秒）", "结果整理耗时（毫秒）"]) await page.getByLabel(label).fill("50");
+  await page.getByLabel("暂时故障位置").selectOption("MOCK_GENERATION"); await page.getByLabel("暂时故障次数").fill("1");
+  const accepted = page.waitForResponse(response => response.url().endsWith("/api/tasks") && response.request().method() === "POST");
+  await submit.click(); const id = (await (await accepted).json()).taskId as string;
+  await page.goto(`/tasks/${id}`); const card = page.locator(`[data-task-id="${id}"]`);
+  await expect(card.getByText("制作成功", { exact: true })).toBeVisible({ timeout: 20000 });
+  const task = await page.request.get(`/api/tasks/${id}`).then(r => r.json());
+  expect(task.attemptCount).toBe(2); expect(task.steps.map((step: { attemptCount: number }) => step.attemptCount)).toEqual([1, 2, 1]);
+  await card.getByText("执行尝试记录", { exact: true }).click();
+  await expect(card.getByText(/已安排重试/)).toBeVisible(); await expect(card.getByRole("button", { name: /预览.*结果/ })).toBeVisible();
+});
