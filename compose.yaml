@@ -22,6 +22,7 @@ services:
       MYSQL_USER: material_app
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
       STORAGE_ROOT: /app/storage
+      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-4}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8080}:8080"

@@ -116,11 +116,12 @@ public class AccountService implements ApplicationRunner {
     }
     @Transactional
     public void delete(String id, String password) {
-        Account account = stored(id);
+        Account account = db.lockAccount(id);
+        if(account==null) throw new ApiException(401,"UNAUTHENTICATED","账户已失效");
         if (password == null || !Passwords.matches(password, account.passwordHash)) throw ApiException.invalid("密码不正确，账户未删除");
         List<String> removable = new ArrayList<>();
         if (account.avatarKey != null) removable.add(account.avatarKey);
-        for (Task task : db.tasksByOwner(id)) {
+        for (Task task : db.lockOwnedTasks(id)) {
             db.deleteSteps(task.id);
             db.deleteTaskLinks(task.id);
             if (task.resultKey != null) removable.add(task.resultKey);
@@ -137,7 +138,10 @@ public class AccountService implements ApplicationRunner {
             if (db.templatesUsingSample(sample) == 0) removable.add("samples/" + sample + ".png");
         }
         db.deleteAccount(id);
-        removable.forEach(files::delete);
+        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+            new org.springframework.transaction.support.TransactionSynchronization() {
+                @Override public void afterCommit() { removable.forEach(files::delete); }
+            });
     }
     private Account stored(String id) {
         Account account = db.account(id);

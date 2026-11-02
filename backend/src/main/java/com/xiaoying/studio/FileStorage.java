@@ -86,15 +86,6 @@ public class FileStorage {
         try(var in=file.getInputStream()) { Files.copy(in,path(key)); }
         catch(IOException e) { delete(key); throw new ApiException(503,"STORAGE_UNAVAILABLE","素材保存失败"); }
     }
-    public String assemble(Models.Task task) throws IOException {
-        String key="results/"+task.id+".png";
-        Path temporary=Files.createTempFile(root.resolve("results"),task.id,".part");
-        try {
-            Files.copy(path("samples/"+task.sampleKey+".png"),temporary,StandardCopyOption.REPLACE_EXISTING);
-            Files.move(temporary,path(key),StandardCopyOption.REPLACE_EXISTING);
-            return key;
-        } finally { Files.deleteIfExists(temporary); }
-    }
     public void delete(String key) {
         try { Files.deleteIfExists(path(key)); } catch(IOException ignored) { /* Orphan cleanup can be done offline. */ }
     }

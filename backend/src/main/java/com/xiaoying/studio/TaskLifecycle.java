@@ -4,52 +4,69 @@ import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.*;
 import com.xiaoying.studio.Models.*;
 import static com.xiaoying.studio.Models.STAGES;
 
+/** Every transition locks the parent row before touching steps or results. */
 @Service
 public class TaskLifecycle {
-    private static final Logger log = LoggerFactory.getLogger(TaskLifecycle.class);
+    private static final Logger log=LoggerFactory.getLogger(TaskLifecycle.class);
     private final StudioMapper db;
     public TaskLifecycle(StudioMapper db) { this.db=db; }
-    @Transactional
+    @Transactional(rollbackFor=Exception.class, isolation=Isolation.READ_COMMITTED)
     public Task claimNext() {
-        String id=db.nextQueued();
+        String id=db.nextQueued(); // Current locking read; other workers skip locked rows.
         if(id==null) return null;
-        log.info("任务 {} 开始认领", id);
-        if(db.claim(id)!=1) { log.info("任务 {} 认领结束，未获得执行权", id); return null; }
-        Step first=db.steps(id).get(0); first.status=StepStatus.RUNNING; first.startedAt=Instant.now(); db.updateStep(first);
-        log.info("任务 {} 认领结束，状态 RUNNING，阶段 MATERIAL_CHECK", id);
+        log.info("任务 {} 开始认领",id);
+        if(db.claim(id)!=1) throw new IllegalStateException("Task claim lost");
+        Step first=db.steps(id).get(0);
+        if(first.status!=StepStatus.PENDING) throw new IllegalStateException("Invalid initial step");
+        first.status=StepStatus.RUNNING; first.startedAt=Instant.now(); save(first);
+        log.info("任务 {} 认领结束，状态 RUNNING，阶段 MATERIAL_CHECK",id);
         return db.task(id);
     }
-    @Transactional
-    public void completeStep(String id,Stage stage,String resultKey,Long resultSize) {
-        Task t=db.task(id);
-        if(t.status!=Status.RUNNING || t.currentStage!=stage) throw new IllegalStateException("Unexpected task transition");
-        var steps=db.steps(id); int index=STAGES.indexOf(stage); Instant now=Instant.now();
-        Step current=steps.get(index); current.status=StepStatus.SUCCEEDED; current.finishedAt=now; db.updateStep(current);
+    @Transactional(rollbackFor=Exception.class, isolation=Isolation.READ_COMMITTED)
+    public void completeStep(String id,Stage stage,byte[] content) {
+        Task t=db.lockTask(id);
+        if(t==null || t.status!=Status.RUNNING || t.currentStage!=stage)
+            throw new IllegalStateException("Unexpected task transition");
+        int index=STAGES.indexOf(stage);
+        if(index<0) throw new IllegalStateException("Not an executable stage");
+        var steps=db.steps(id); Instant now=Instant.now();
+        Step current=steps.get(index);
+        if(current.status!=StepStatus.RUNNING) throw new IllegalStateException("Step is not running");
+        current.status=StepStatus.SUCCEEDED; current.finishedAt=now; save(current);
         if(index==STAGES.size()-1) {
             boolean linked=Models.text(t.sampleResultUrl)!=null;
-            if(!linked && (resultKey==null || resultSize==null)) throw new IllegalStateException("Result is required");
-            t.status=Status.SUCCEEDED; t.currentStage=Stage.COMPLETED; t.resultKey=linked?null:resultKey; t.resultSize=resultSize==null?0L:resultSize; t.finishedAt=now;
+            if(!linked) {
+                if(content==null || content.length==0) throw new IllegalStateException("Result is required");
+                if(db.insertResult(id,content)!=1) throw new IllegalStateException("Result insert failed");
+            }
+            t.status=Status.SUCCEEDED; t.currentStage=Stage.COMPLETED;
+            t.resultKey=null; t.resultSize=linked?0L:(long)content.length; t.finishedAt=now;
         } else {
-            Step next=steps.get(index+1); next.status=StepStatus.RUNNING; next.startedAt=now; db.updateStep(next); t.currentStage=next.stage;
+            Step next=steps.get(index+1);
+            if(next.status!=StepStatus.PENDING) throw new IllegalStateException("Next step is not pending");
+            next.status=StepStatus.RUNNING; next.startedAt=now; save(next); t.currentStage=next.stage;
         }
-        t.updatedAt=now; if(db.updateTask(t)!=1) throw new IllegalStateException("Concurrent task update");
+        t.updatedAt=now; update(t);
     }
-    @Transactional
+    @Transactional(rollbackFor=Exception.class, isolation=Isolation.READ_COMMITTED)
     public void fail(String id,String code,String message) {
-        Task t=db.task(id);
-        if(t==null || t.status!=Status.RUNNING) { log.info("任务 {} 跳过失败记录，当前状态 {}", id, t==null?"缺失":t.status); return; }
-        log.info("任务 {} 开始记录失败，阶段 {}，代码 {}", id, t.currentStage, code);
+        Task t=db.lockTask(id);
+        if(t==null || t.status!=Status.RUNNING) { log.info("任务 {} 跳过失败记录",id); return; }
+        log.info("任务 {} 开始记录失败，阶段 {}，代码 {}",id,t.currentStage,code);
         Instant now=Instant.now(); t.status=Status.FAILED; t.failureStage=t.currentStage;
         t.errorCode=code; t.errorMessage=message; t.finishedAt=now; t.updatedAt=now;
         for(Step s:db.steps(id)) {
-            if(s.status==StepStatus.RUNNING) { s.status=StepStatus.FAILED; s.errorCode=code; s.errorMessage=message; s.finishedAt=now; db.updateStep(s); }
-            else if(s.status==StepStatus.PENDING) { s.status=StepStatus.SKIPPED; s.finishedAt=now; db.updateStep(s); }
+            if(s.status==StepStatus.RUNNING) {
+                s.status=StepStatus.FAILED; s.errorCode=code; s.errorMessage=message; s.finishedAt=now; save(s);
+            } else if(s.status==StepStatus.PENDING) { s.status=StepStatus.SKIPPED; s.finishedAt=now; save(s); }
         }
-        if(db.updateTask(t)!=1) throw new IllegalStateException("Concurrent task update");
-        log.info("任务 {} 失败记录结束，状态 FAILED，阶段 {}", id, t.failureStage);
+        update(t);
+        log.info("任务 {} 失败记录结束，阶段 {}",id,t.failureStage);
     }
+    private void save(Step s) { if(db.updateStep(s)!=1) throw new IllegalStateException("Missing task step"); }
+    private void update(Task t) { if(db.updateTask(t)!=1) throw new IllegalStateException("Concurrent task update"); }
 }

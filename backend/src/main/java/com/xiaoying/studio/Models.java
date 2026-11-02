@@ -29,7 +29,9 @@ public final class Models {
                              @Min(0) @Max(30000) Integer resultAssemblyDelayMs) {}
     public record CreateTask(@NotBlank String templateId, @NotEmpty @Size(max=3) List<@NotBlank String> assetIds,
                              @Valid Simulation simulation) {}
-    public record Page<T>(List<T> items, long total, int page, int pageSize) {}
+    public record Page<T>(List<T> items, long total, int page, int pageSize, String nextCursor) {
+        public Page(List<T> items,long total,int page,int pageSize) { this(items,total,page,pageSize,null); }
+    }
     public static class Category { public String id, name; public int sortOrder; }
     public static class Template {
         public String id, categoryId, title, description, acceptedMimeTypes, sampleKey, coverUrl, sampleResultUrl, ownerId;
@@ -46,6 +48,7 @@ public final class Models {
         public Long resultSize; public long version;
         public Instant createdAt, updatedAt, startedAt, finishedAt;
     }
+    public static class TaskResult { public byte[] content; }
     public static class Step {
         public String taskId, errorCode, errorMessage; public Stage stage; public int sequenceNo;
         public StepStatus status; public Instant startedAt, finishedAt;

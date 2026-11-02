@@ -43,3 +43,4 @@ app:
   worker:
     enabled: ${TASK_WORKER_ENABLED:true}
     interval-ms: ${TASK_DISPATCH_INTERVAL_MS:500}
+    concurrency: ${TASK_WORKER_CONCURRENCY:4}

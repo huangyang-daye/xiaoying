@@ -1,10 +1,10 @@
 import { api, terminal, type Page, type Task } from "./api";
 
 type Snapshot = { tasks: Record<string, Task>; errors: Record<string, string>; syncError: string | null; ready: boolean };
-type Transport = { task: (id: string, signal: AbortSignal) => Promise<Task>; active: (page: number, signal: AbortSignal) => Promise<Page<Task>> };
+type Transport = { task: (id: string, signal: AbortSignal) => Promise<Task>; active: (page: number, signal: AbortSignal, before?: string) => Promise<Page<Task>> };
 const transport: Transport = {
   task: (id, signal) => api(`/api/tasks/${encodeURIComponent(id)}`, { signal }),
-  active: (page, signal) => api(`/api/tasks/active?page=${page}&pageSize=50`, { signal }),
+  active: (page, signal, before) => api(`/api/tasks/active?page=${page}&pageSize=50${before ? `&before=${encodeURIComponent(before)}` : ""}`, { signal }),
 };
 export class TaskTracker {
   private state: Snapshot = { tasks: {}, errors: {}, syncError: null, ready: false };
@@ -49,11 +49,15 @@ export class TaskTracker {
     this.bootstrap?.abort(); const controller = new AbortController(); this.bootstrap = controller;
     this.update({ ...this.state, syncError: null });
     try {
+      let before: string | undefined;
       for (let page = 1; ; page++) {
-        const data = await this.io.active(page, controller.signal);
+        const data = await this.io.active(page, controller.signal, before);
         if (controller.signal.aborted || this.stopped) return;
         data.items.forEach(this.merge);
-        if (page * data.pageSize >= data.total || data.items.length === 0) break;
+        if ("nextCursor" in data) {
+          if (!data.nextCursor || data.items.length === 0) break;
+          before = data.nextCursor;
+        } else if (page * data.pageSize >= data.total || data.items.length === 0) break;
       }
       this.update({ ...this.state, ready: true });
     } catch (error) {

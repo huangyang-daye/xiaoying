@@ -97,7 +97,7 @@ page ≥ 1，pageSize 1～50。任务响应字段：id、templateId、templateTi
 
 ## 异步流程及模拟参数
 
-受理事务写入任务、素材顺序与三条 PENDING 步骤后立即返回。Java 定时工作线程按创建时间扫描数据库队列，条件更新 QUEUED→RUNNING 认领；单线程顺序制作，其余任务排队。没有 HTTP 请求驱动步骤执行，也不依赖浏览器持续打开。
+受理事务写入任务、素材顺序与三条 PENDING 步骤后立即返回。Java 定时工作线程按创建时间扫描数据库队列，`FOR UPDATE SKIP LOCKED` 锁定后条件更新 QUEUED→RUNNING 认领；默认 4 个工作线程并行制作，超出并发上限的任务保留在数据库队列中；各任务内部仍按阶段顺序执行。没有 HTTP 请求驱动步骤执行，也不依赖浏览器持续打开。
 
 整体状态 `QUEUED → RUNNING → SUCCEEDED | FAILED`；阶段 `NOT_STARTED → MATERIAL_CHECK → MOCK_GENERATION → RESULT_ASSEMBLY → COMPLETED`。步骤 `PENDING → RUNNING → SUCCEEDED | FAILED`，失败后的步骤为 SKIPPED。步骤成功和下一阶段开始在同一短事务中提交，等待过程不持有数据库事务；结果写入完成后，最后一步与整体成功一起提交。
 
@@ -142,12 +142,25 @@ pwsh -File backend/scripts/demo.ps1 -DelayMs 5000
 | TASK_DEFAULT_CHECK_DELAY_MS | 1000，整数 0～30000 |
 | TASK_DEFAULT_GENERATION_DELAY_MS | 4000，整数 0～30000 |
 | TASK_DEFAULT_ASSEMBLY_DELAY_MS | 1000，整数 0～30000 |
+| TASK_WORKER_CONCURRENCY | 4；每实例并发任务数，1～32；Compose 可从 .env 配置 |
 | TASK_WORKER_ENABLED | true；测试关闭自动调度以检查每个边界 |
 | TASK_DISPATCH_INTERVAL_MS | 500，工作线程空闲时的扫描间隔，须为正数 |
 
 与规划草案的具体差异：实现采用服务端会话而非自制签名 Cookie，无需 SESSION_SIGNING_SECRET；演示用户沿用固定 ID，注册用户使用 32 位随机 ID；结果元信息内嵌任务表；模板标题和样本引用在任务创建时固定，素材数量可从关联记录恢复。实现契约以本文和代码为准。
 
+## 事务与结果一致性
+
+认领、阶段迁移和失败记录均为独立短事务（写事务 READ_COMMITTED），先锁定任务父行，再修改步骤；任务更新额外校验 version。受理事务创建任务、素材顺序和三个步骤，未提交记录不会被工作线程认领。历史与详情使用 REPEATABLE_READ，避免读到任务和步骤的不同提交版本。等待和图片准备不持有事务锁。
+
+V6 新增 task_result，使用 task_id 主键及级联外键，保存新本地模拟结果的二进制内容，与最后步骤、结果大小和成功状态一并提交；不再为新任务写 results 文件。查询结果地址不变，旧结果仍按 result_key 从文件卷读取。外链结果只对数据库元信息提供事务一致性，不承诺外部资源的可用性。
+
+活动任务查询新增 before（上一页 nextCursor），按 created_at/id 稳定游标扫描；保留 page/pageSize 供旧调用使用，前端恢复采用游标以应对并行完成。账户删除先锁账户及所属任务，结果记录级联删除，文件在 afterCommit 回调清理；回滚时不提前删除文件。文件清理失败可能留下孤立文件，但不会因为删除事务回滚而丢失已保留记录的文件。
+
+设计、ACID 边界与测试场景见 [并发与一致性设计](../docs/async-consistency.md)。
+
 ## 测试、边界和后续工作
+
+2026-11-02 并发改造验证：容器内完整 verify 共 39 项通过（含真实 MySQL 8.4），0 失败、0 跳过，jar 构建通过；包括多工作线程唯一认领、有界并行、受理/阶段/删除回滚、成功失败竞争和稳定游标恢复。以下 2026-11-01 记录为改造前历史结果。
 
 2026-11-01 验证结果：`mvn -B -ntp verify -DrequireDocker=true` 共 18 项通过，0 失败、0 跳过；包含真实 MySQL 8.4 容器以及启用真实调度器的回归测试。另在独立 Compose 项目中完成镜像构建、启动与健康检查，通过 HTTP 演示成功及三个阶段失败，确认成功图片可读取；重启后重新登录，同一历史终态与结果文件仍可读取。验收结束后已停止临时容器，数据卷保留。GitHub Actions 尚未推送触发；该条为后端阶段的历史验证记录；后续前端联调结果见前端 README。
 

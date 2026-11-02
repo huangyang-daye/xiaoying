@@ -30,19 +30,27 @@ public interface StudioMapper {
     @Insert("INSERT INTO task_step(task_id,stage,sequence_no,status) VALUES(#{task},#{stage},#{seq},'PENDING')")
     void insertStep(@Param("task") String task,@Param("stage") Stage stage,@Param("seq") int seq);
     @Select("SELECT * FROM production_task WHERE id=#{id}") Task task(String id);
+    @Select("SELECT * FROM production_task WHERE id=#{id} FOR UPDATE") Task lockTask(String id);
+    @Select("SELECT * FROM production_task WHERE owner_id=#{owner} ORDER BY id FOR UPDATE") List<Task> lockOwnedTasks(String owner);
+    @Select("SELECT * FROM app_user WHERE id=#{id} FOR UPDATE") Account lockAccount(String id);
+    @Insert("INSERT INTO task_result(task_id,content) VALUES(#{id},#{content})")
+    int insertResult(@Param("id") String id,@Param("content") byte[] content);
+    @Select("SELECT content FROM task_result WHERE task_id=#{id}")
+    @Results(@Result(column="content",property="content",javaType=byte[].class)) TaskResult result(String id);
+    default byte[] resultContent(String id) { TaskResult row=result(id); return row==null?null:row.content; }
     @Select("SELECT * FROM task_step WHERE task_id=#{id} ORDER BY sequence_no") List<Step> steps(String id);
     @Select("SELECT a.* FROM asset a JOIN task_asset ta ON a.id=ta.asset_id WHERE ta.task_id=#{id} ORDER BY ta.slot_index") List<Asset> taskAssets(String id);
-    @Select("SELECT id FROM production_task WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1") String nextQueued();
+    @Select("SELECT id FROM production_task WHERE status='QUEUED' ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED") String nextQueued();
     @Update("UPDATE production_task SET status='RUNNING',current_stage='MATERIAL_CHECK',started_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6),version=version+1 WHERE id=#{id} AND status='QUEUED'") int claim(String id);
     @Update("""
         UPDATE production_task SET status=#{status},current_stage=#{currentStage},failure_stage=#{failureStage},
         error_code=#{errorCode},error_message=#{errorMessage},result_key=#{resultKey},result_size=#{resultSize},
-        finished_at=#{finishedAt},updated_at=#{updatedAt},version=version+1 WHERE id=#{id} AND status='RUNNING'
+        finished_at=#{finishedAt},updated_at=#{updatedAt},version=version+1 WHERE id=#{id} AND status='RUNNING' AND version=#{version}
         """) int updateTask(Task t);
     @Update("""
         UPDATE task_step SET status=#{status},started_at=#{startedAt},finished_at=#{finishedAt},
         error_code=#{errorCode},error_message=#{errorMessage} WHERE task_id=#{taskId} AND stage=#{stage}
-        """) void updateStep(Step s);
+        """) int updateStep(Step s);
     @Select("SELECT * FROM production_task WHERE status='RUNNING'") List<Task> interrupted();
     @Select("""
         <script>SELECT * FROM production_task WHERE owner_id=#{owner}
@@ -50,6 +58,11 @@ public interface StudioMapper {
         <foreach collection='statuses' item='s' open='(' separator=',' close=')'>#{s}</foreach></if>
         ORDER BY created_at DESC,id DESC LIMIT #{limit} OFFSET #{offset}</script>
         """) List<Task> history(@Param("owner") String owner,@Param("statuses") List<Status> statuses,@Param("limit") int limit,@Param("offset") long offset);
+    @Select("""
+        <script>SELECT * FROM production_task WHERE owner_id=#{owner} AND status IN ('QUEUED','RUNNING')
+        <if test='anchor != null'>AND (created_at &lt; #{anchor.createdAt} OR (created_at=#{anchor.createdAt} AND id &lt; #{anchor.id}))</if>
+        ORDER BY created_at DESC,id DESC LIMIT #{limit} OFFSET #{offset}</script>
+        """) List<Task> activeAfter(@Param("owner") String owner,@Param("anchor") Task anchor,@Param("limit") int limit,@Param("offset") long offset);
     @Select("SELECT * FROM app_user WHERE id=#{id}") Account account(String id);
     @Select("SELECT * FROM app_user WHERE username=#{username}") Account accountByUsername(String username);
     @Select("SELECT * FROM app_user WHERE email=#{email}") Account accountByEmail(String email);

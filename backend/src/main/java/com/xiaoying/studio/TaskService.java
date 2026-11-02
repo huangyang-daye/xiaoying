@@ -33,6 +33,7 @@ public class TaskService {
         catch(RuntimeException e) { log.info("制作任务受理结束，未创建任务：{}", e.getMessage()); throw e; }
     }
     private Task accept(String owner,CreateTask request) {
+        if(db.lockAccount(owner)==null) throw new ApiException(401,"UNAUTHENTICATED","账户已失效");
         Template template=catalog.require(request.templateId(),owner);
         var ids=request.assetIds();
         if(ids.size()!=template.requiredImageCount || new HashSet<>(ids).size()!=ids.size()) throw new ApiException(400,"INVALID_ASSET_COUNT","图片数量须符合模板要求且不可重复");
@@ -62,6 +63,22 @@ public class TaskService {
     public Page<TaskView> history(String owner,List<Status> statuses,int page,int size) {
         CatalogService.validatePage(page,size);
         return new Page<>(db.history(owner,statuses,size,(long)(page-1)*size).stream().map(this::view).toList(),db.taskCount(owner,statuses),page,size);
+    }
+    @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
+    public byte[] resultBytes(String id,String owner) {
+        Task t=owned(id,owner);
+        if(t.status!=Status.SUCCEEDED) throw ApiException.missing("RESULT");
+        return db.resultContent(id);
+    }
+    @Transactional(readOnly=true,isolation=Isolation.REPEATABLE_READ)
+    public Page<TaskView> active(String owner,String before,int page,int size) {
+        CatalogService.validatePage(page,size);
+        Task anchor=before==null?null:owned(before,owner);
+        var rows=db.activeAfter(owner,anchor,size+1,anchor==null?(long)(page-1)*size:0);
+        boolean more=rows.size()>size;
+        var items=rows.subList(0,Math.min(size,rows.size()));
+        return new Page<>(items.stream().map(this::view).toList(),db.taskCount(owner,List.of(Status.QUEUED,Status.RUNNING)),
+            page,size,more?items.get(items.size()-1).id:null);
     }
     private static String imageType(String url) {
         String path=url; int query=path.indexOf('?'); if(query>=0) path=path.substring(0,query);

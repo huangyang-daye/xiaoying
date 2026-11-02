@@ -49,4 +49,15 @@ describe("per-session task tracking", () => {
     const tracker = new TaskTracker({ task: fetch, active }); await tracker.start(); expect(active).toHaveBeenCalledTimes(2);
     const pending = tracker.query("1"); await tracker.query("1"); expect(fetch).toHaveBeenCalledTimes(1); finish(task("1", "SUCCEEDED", 2)); await pending; tracker.dispose();
   });
+  it("uses a stable cursor even when earlier tasks finish between active pages", async () => {
+    const active = vi.fn(async (_page: number, _signal: AbortSignal, before?: string) => before
+      ? { items: [task("older")], total: 1, page: 2, pageSize: 2, nextCursor: null }
+      : { items: [task("newer"), task("boundary")], total: 3, page: 1, pageSize: 2, nextCursor: "boundary" });
+    const tracker = new TaskTracker({ task: async id => task(id), active });
+    await tracker.start();
+    expect(active.mock.calls[1][2]).toBe("boundary");
+    expect(Object.keys(tracker.getSnapshot().tasks)).toEqual(["newer", "boundary", "older"]);
+    tracker.dispose();
+  });
+
 });

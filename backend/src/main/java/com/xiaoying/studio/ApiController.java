@@ -79,13 +79,18 @@ public class ApiController {
     @GetMapping("/api/tasks") public Page<TaskView> history(HttpServletRequest request,@RequestParam(required=false) List<Status> status,
         @RequestParam(defaultValue="1") int page,@RequestParam(defaultValue="20") int pageSize) { return tasks.history(user(request).id(),status,page,pageSize); }
     @GetMapping("/api/tasks/active") public Page<TaskView> active(HttpServletRequest request,
-        @RequestParam(defaultValue="1") int page,@RequestParam(defaultValue="20") int pageSize) { return tasks.history(user(request).id(),List.of(Status.QUEUED,Status.RUNNING),page,pageSize); }
+        @RequestParam(defaultValue="1") int page,@RequestParam(defaultValue="20") int pageSize,
+        @RequestParam(required=false) String before) { return tasks.active(user(request).id(),before,page,pageSize); }
     @GetMapping("/files/assets/{id}") public ResponseEntity<?> asset(@PathVariable String id,HttpServletRequest request) throws IOException {
         Asset a=assets.require(id,user(request).id()); return file(a.storageKey,a.mimeType,false);
     }
     @GetMapping("/files/results/{id}") public ResponseEntity<?> result(@PathVariable String id,HttpServletRequest request) throws IOException {
-        Task t=tasks.owned(id,user(request).id()); if(t.status!=Status.SUCCEEDED || t.resultKey==null) throw ApiException.missing("RESULT");
-        return file(t.resultKey,"image/png",false);
+        Task t=tasks.owned(id,user(request).id()); if(t.status!=Status.SUCCEEDED) throw ApiException.missing("RESULT");
+        byte[] content=tasks.resultBytes(id,user(request).id());
+        if(content!=null) return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).contentLength(content.length)
+            .header("Cache-Control","private, no-store").body(content);
+        if(t.resultKey==null) throw ApiException.missing("RESULT");
+        return file(t.resultKey,"image/png",false); // Compatibility for results created before V6.
     }
     @GetMapping("/files/avatars/{id}") public ResponseEntity<?> avatar(@PathVariable String id,HttpServletRequest request) throws IOException {
         if(!user(request).id().equals(id)) throw ApiException.missing("AVATAR");

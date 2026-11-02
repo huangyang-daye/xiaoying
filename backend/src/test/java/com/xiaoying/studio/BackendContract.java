@@ -26,6 +26,8 @@ abstract class BackendContract {
     @Autowired TaskLifecycle lifecycle;
     @Autowired StudioMapper db;
     @Autowired FileStorage files;
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactionManager;
+    @Autowired TaskService tasks;
     MockHttpSession a,b;
 
     @BeforeEach void reset() throws Exception {
@@ -204,7 +206,7 @@ abstract class BackendContract {
         assertEquals("MATERIAL_UNAVAILABLE",db.task(id).errorCode);
         String interrupted=create(Failure.NONE,0);
         assertEquals(interrupted,lifecycle.claimNext().id);
-        new TaskScheduler(processor,lifecycle,db).recover();
+        try(var dispatcher=new TaskScheduler(processor,lifecycle,db,2)) { dispatcher.recover(); }
         assertEquals("RESTART_INTERRUPTED",db.task(interrupted).errorCode);
         assertEquals(StepStatus.SKIPPED,db.steps(interrupted).get(1).status);
     }
@@ -288,4 +290,100 @@ abstract class BackendContract {
             jdbc.update("DELETE FROM app_user WHERE id=?",id);
         }
     }
+    @Test void uncommittedAcceptanceIsInvisibleAndRollbackRemovesAllRows() throws Exception {
+        String asset=upload(a);
+        var executor=Executors.newSingleThreadExecutor();
+        var tx=new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+        try {
+            assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(status->{
+                Task created=tasks.create("demo-a",new CreateTask("demo-pet",List.of(asset),new Simulation(Failure.NONE,0,0,0)));
+                try { assertNull(executor.submit(lifecycle::claimNext).get(5,TimeUnit.SECONDS)); }
+                catch(Exception e) { throw new AssertionError(e); }
+                assertNotNull(db.task(created.id));
+                throw new IllegalStateException("force acceptance rollback");
+            }));
+            assertEquals(0,db.taskCount("demo-a",null));
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM task_step",Integer.class));
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM task_asset",Integer.class));
+        } finally { executor.shutdownNow(); }
+    }
+    @Test void brokenTransitionRollsBackStepAndResultWrites() throws Exception {
+        String id=create(Failure.NONE,0); lifecycle.claimNext();
+        lifecycle.completeStep(id,Stage.MATERIAL_CHECK,null);
+        lifecycle.completeStep(id,Stage.MOCK_GENERATION,null);
+        long version=db.task(id).version;
+        assertThrows(IllegalStateException.class,()->lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,null));
+        assertEquals(StepStatus.RUNNING,db.steps(id).get(2).status);
+        assertEquals(version,db.task(id).version);
+        assertNull(db.resultContent(id));
+        // A failing SQL write after updating the step must roll that step back too.
+        db.insertResult(id,image());
+        assertThrows(org.springframework.dao.DataAccessException.class,()->lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,new byte[]{1}));
+        assertEquals(StepStatus.RUNNING,db.steps(id).get(2).status);
+        assertEquals(Status.RUNNING,db.task(id).status);
+        assertEquals(version,db.task(id).version);
+        jdbc.update("DELETE FROM task_result WHERE task_id=?",id);
+        lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,image());
+        assertArrayEquals(image(),db.resultContent(id));
+        assertEquals(Status.SUCCEEDED,db.task(id).status);
+    }
+    @Test void concurrentSuccessAndFailureCannotMixTerminalRecords() throws Exception {
+        String id=create(Failure.NONE,0); lifecycle.claimNext();
+        lifecycle.completeStep(id,Stage.MATERIAL_CHECK,null);
+        lifecycle.completeStep(id,Stage.MOCK_GENERATION,null);
+        byte[] content=image(); var barrier=new CyclicBarrier(2); var executor=Executors.newFixedThreadPool(2);
+        try {
+            var completed=executor.submit(()->{ barrier.await(); try { lifecycle.completeStep(id,Stage.RESULT_ASSEMBLY,content); } catch(IllegalStateException expected) { } return null; });
+            var failed=executor.submit(()->{ barrier.await(); lifecycle.fail(id,"TEST_FAILURE","concurrent failure"); return null; });
+            completed.get(5,TimeUnit.SECONDS); failed.get(5,TimeUnit.SECONDS);
+            Task stored=db.task(id); Step last=db.steps(id).get(2);
+            if(stored.status==Status.SUCCEEDED) {
+                assertEquals(Stage.COMPLETED,stored.currentStage); assertNull(stored.failureStage);
+                assertEquals(StepStatus.SUCCEEDED,last.status); assertArrayEquals(content,db.resultContent(id));
+            } else {
+                assertEquals(Status.FAILED,stored.status); assertEquals(Stage.RESULT_ASSEMBLY,stored.failureStage);
+                assertEquals(StepStatus.FAILED,last.status); assertNull(db.resultContent(id));
+            }
+        } finally { executor.shutdownNow(); }
+    }
+    @Test void manyWorkersClaimEachTaskExactlyOnce() throws Exception {
+        var ids=new HashSet<String>(); for(int i=0;i<8;i++) ids.add(create(Failure.NONE,0));
+        var executor=Executors.newFixedThreadPool(8); var start=new CountDownLatch(1);
+        try {
+            List<Future<Task>> claims=new ArrayList<>();
+            for(int i=0;i<8;i++) claims.add(executor.submit(()->{ start.await();
+                for(int attempt=0;attempt<100;attempt++) { Task t=lifecycle.claimNext(); if(t!=null) return t; Thread.sleep(10); }
+                return null; }));
+            start.countDown(); var claimed=new HashSet<String>();
+            for(var claim:claims) { Task t=claim.get(10,TimeUnit.SECONDS); assertNotNull(t); assertTrue(claimed.add(t.id)); }
+            assertEquals(ids,claimed);
+            for(String id:ids) { assertEquals(Status.RUNNING,db.task(id).status); assertEquals(1,db.task(id).version); }
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test void activeCursorDoesNotSkipTasksWhenEarlierPageFinishes() throws Exception {
+        String oldest=create(Failure.NONE,0), middle=create(Failure.NONE,0), newest=create(Failure.NONE,0);
+        var first=tasks.active("demo-a",null,1,2);
+        assertEquals(List.of(newest,middle),first.items().stream().map(TaskView::id).toList());
+        assertEquals(middle,first.nextCursor());
+        // Force the previously returned tasks to finish before the next request.
+        jdbc.update("UPDATE production_task SET status='RUNNING' WHERE id IN (?,?)",middle,newest);
+        lifecycle.fail(middle,"TEST","finished during pagination"); lifecycle.fail(newest,"TEST","finished during pagination");
+        var next=tasks.active("demo-a",first.nextCursor(),2,2);
+        assertEquals(List.of(oldest),next.items().stream().map(TaskView::id).toList());
+        assertNull(next.nextCursor());
+    }
+
+    @Test void rolledBackAccountDeletionPreservesAssetsAndTaskResults() throws Exception {
+        String id=create(Failure.NONE,0); processor.runNext();
+        Asset asset=db.taskAssets(id).get(0); byte[] content=db.resultContent(id);
+        var tx=new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(status->{
+            new AccountService(db,files).delete("demo-a",AccountService.DEMO_PASSWORD);
+            throw new IllegalStateException("rollback deletion");
+        }));
+        assertNotNull(db.account("demo-a")); assertEquals(Status.SUCCEEDED,db.task(id).status);
+        assertArrayEquals(content,db.resultContent(id)); assertTrue(Files.isRegularFile(files.path(asset.storageKey)));
+    }
+
 }
